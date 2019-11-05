@@ -50,7 +50,7 @@ class CopyRNN(nn.Module):
         max_oov_count = args.max_oov_count
         max_len = args.max_src_len
         embed_size = args.embed_size
-        embedding = nn.Embedding(len(vocab2id), embed_size)
+        embedding = nn.Embedding(len(vocab2id), embed_size, vocab2id[PAD_WORD])
         self.encoder = CopyRnnEncoder(vocab2id, embedding, src_hidden_size, False, 0.5, 0.5)
         self.decoder = CopyRnnDecoder(vocab2id,
                                       embedding,
@@ -62,19 +62,20 @@ class CopyRNN(nn.Module):
                                       max_oov_count)
 
     def forward(self, src_tokens, src_lens, prev_output_tokens, prev_output_lens, encoder_output,
-                src_tokens_with_oov, oov_counts, decoder_state):
-        batch_size = len(src_tokens)
+                src_tokens_with_oov, oov_counts, decoder_state, hidden_state):
         if encoder_output is None:
             encoder_output = self.encoder(src_tokens, src_lens)
+            hidden_state = encoder_output['encoder_hidden']
 
-        decoder_prob, decoder_state = self.decoder(prev_output_tokens,
-                                                   prev_output_lens,
-                                                   encoder_output,
-                                                   decoder_state,
-                                                   src_tokens,
-                                                   src_tokens_with_oov,
-                                                   oov_counts)
-        return decoder_prob, encoder_output, decoder_state
+        decoder_prob, decoder_state, hidden_state = self.decoder(prev_output_tokens,
+                                                                 prev_output_lens,
+                                                                 encoder_output,
+                                                                 decoder_state,
+                                                                 hidden_state,
+                                                                 src_tokens,
+                                                                 src_tokens_with_oov,
+                                                                 oov_counts)
+        return decoder_prob, encoder_output, decoder_state, hidden_state
 
 
 class CopyRnnEncoder(nn.Module):
@@ -97,12 +98,13 @@ class CopyRnnEncoder(nn.Module):
             num_layers=1,
             bidirectional=bidirectional,
             batch_first=True,
-            dropout=dropout_in
+            # dropout=dropout_in
         )
 
     def forward(self, src_tokens, src_lengths=None, **kwargs):
         batch_size = len(src_tokens)
         src_embed = self.embedding(src_tokens)
+        total_length = src_embed.size(1)
         packed_src_embed = nn.utils.rnn.pack_padded_sequence(src_embed,
                                                              src_lengths.data.tolist(),
                                                              batch_first=True,
@@ -110,20 +112,21 @@ class CopyRnnEncoder(nn.Module):
         state_size = (self.num_layers, batch_size, self.hidden_size)
         h0 = src_embed.new_zeros(state_size)
         c0 = src_embed.new_zeros(state_size)
-        packed_outs, (final_hiddens, final_cells) = self.lstm(packed_src_embed, (h0, c0))
-        hidden_states, _ = nn.utils.rnn.pad_packed_sequence(packed_outs,
+        hidden_states, (final_hiddens, final_cells) = self.lstm(packed_src_embed, (h0, c0))
+        hidden_states, _ = nn.utils.rnn.pad_packed_sequence(hidden_states,
                                                             padding_value=self.pad_idx,
-                                                            batch_first=True)
+                                                            batch_first=True,
+                                                            total_length=total_length)
         encoder_padding_mask = src_tokens.eq(self.pad_idx)
         output = {'encoder_output': hidden_states,
-                  'encoder_padding_mask': encoder_padding_mask}
+                  'encoder_padding_mask': encoder_padding_mask,
+                  'encoder_hidden': (final_hiddens, final_cells)}
         return output
 
 
 class CopyRnnDecoder(nn.Module):
     def __init__(self, vocab2id, embedding, hidden_size, src_hidden_size, max_len,
                  bidirectional, dropout, max_oov_len
-
                  ):
         super().__init__()
         self.vocab2id = vocab2id
@@ -137,27 +140,28 @@ class CopyRnnDecoder(nn.Module):
         self.max_len = max_len
         self.max_oov_len = max_oov_len
         self.pad_idx = vocab2id[PAD_WORD]
-        self.placeholder_idx = vocab2id[PLACEHOLDER_WORD]
         self.lstm = nn.LSTM(
             input_size=embed_dim + src_hidden_size,
             hidden_size=hidden_size,
             num_layers=1,
             bidirectional=bidirectional,
             batch_first=True,
-            dropout=dropout
+            # dropout=dropout
         )
         self.attn_layer = Attention(src_hidden_size, hidden_size)
         self.copy_proj = nn.Linear(src_hidden_size, hidden_size, bias=False)
-        self.generate_proj = nn.Linear(hidden_size, self.vocab_size + max_oov_len, bias=False)
+        self.input_copy_proj = nn.Linear(src_hidden_size, hidden_size, bias=False)
+        self.generate_proj = nn.Linear(hidden_size, self.vocab_size, bias=False)
 
-    def forward(self, prev_output_tokens, prev_output_lens, encoder_output_dict, prev_hidden_state,
+    def forward(self, prev_output_tokens, prev_output_lens, encoder_output_dict, prev_context_state,
+                prev_rnn_state,
                 src_tokens, src_tokens_with_oov, oov_counts):
         """
 
         :param prev_output_tokens: B x 1
         :param prev_output_lens: B x 1
         :param encoder_output_dict:
-        :param prev_hidden_state: B x TH
+        :param prev_context_state: B x TH
         :param src_tokens: B x max_len
         :param src_tokens_with_oov: B x max_len
         :param oov_counts: B
@@ -169,13 +173,14 @@ class CopyRnnDecoder(nn.Module):
         prev_output_lens = torch.as_tensor(prev_output_lens, dtype=torch.int64)
         encoder_output = encoder_output_dict['encoder_output']
         encoder_output_mask = encoder_output_dict['encoder_padding_mask']
+
         # mask : B x L x 1
         mask = torch.eq(prev_output_tokens.repeat(1, self.max_len), src_tokens).type_as(encoder_output)
         mask = mask.unsqueeze(2)
 
         # B x 1 x SH
-        aggregate_weight = torch.tanh(self.copy_proj(torch.mul(mask, encoder_output)))
-        copy_weight = torch.softmax(torch.bmm(aggregate_weight, prev_hidden_state.unsqueeze(2)), 1)
+        aggregate_weight = torch.tanh(self.input_copy_proj(torch.mul(mask, encoder_output)))
+        copy_weight = torch.softmax(torch.bmm(aggregate_weight, prev_context_state.unsqueeze(2)), 1)
         # B x L x 1
         # aggregate_weight
         copy_state = torch.sum(torch.mul(copy_weight, encoder_output), dim=1).unsqueeze(1)
@@ -183,48 +188,34 @@ class CopyRnnDecoder(nn.Module):
         src_embed = self.embedding(prev_output_tokens)
         decoder_input = torch.cat([src_embed, copy_state], dim=2)
 
-        state_size = (1, batch_size, self.hidden_size)
-        h0 = src_embed.new_zeros(state_size)
-        c0 = src_embed.new_zeros(state_size)
         packed_src_embed = nn.utils.rnn.pack_padded_sequence(decoder_input,
                                                              prev_output_lens,
                                                              batch_first=True)
-        packed_outs, (final_hiddens, final_cells) = self.lstm(packed_src_embed, (h0, c0))
+        h, c = prev_rnn_state
+        packed_outs, (h, c) = self.lstm(packed_src_embed, (h, c))
         rnn_output, _ = nn.utils.rnn.pad_packed_sequence(packed_outs,
                                                          padding_value=self.pad_idx,
                                                          batch_first=True)
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
         generate_logits = self.generate_proj(attn_output).squeeze(1)
-
-        copy_logits = self.get_copy_score(batch_size,
-                                          encoder_output,
+        generate_logits = torch.cat([generate_logits, torch.zeros(batch_size, self.max_oov_len)], dim=1)
+        copy_logits = self.get_copy_score(encoder_output,
                                           src_tokens_with_oov,
                                           oov_counts,
                                           attn_output)
         total_logit = generate_logits + copy_logits
-        placeholder_idx_tensor = torch.tensor([[self.placeholder_idx]] * batch_size, dtype=torch.int64)
-        total_logit.scatter_(1, placeholder_idx_tensor, float('-inf'))
         total_prob = torch.softmax(total_logit, 1)
 
-        return total_prob, attn_output.squeeze(1)
+        return total_prob, attn_output.squeeze(1), (h, c)
 
-    def get_copy_score(self, batch_size, encoder_out, src_tokens_with_oov, oov_counts, decoder_output):
-        batch_idx_list = []
-        batch_val = []
-        for batch_idx, single_batch_src_token in enumerate(src_tokens_with_oov):
-            for token_idx, token in enumerate(single_batch_src_token):
-                batch_idx_list.append((batch_idx, token, token_idx))
-                batch_val.append(1.0)
-        batch_idx_list = torch.LongTensor(batch_idx_list)
-        batch_val = torch.FloatTensor(batch_val)
-        src_map_size = torch.Size([batch_size, self.vocab_size + self.max_oov_len, self.max_len])
-        src_map = torch.sparse.FloatTensor(batch_idx_list.t(), batch_val, src_map_size).to_dense()
+    def get_copy_score(self, encoder_out, src_tokens_with_oov, oov_counts, decoder_output):
+        copy_score = torch.bmm(torch.tanh(self.copy_proj(encoder_out)), decoder_output.permute(0, 2, 1))
+        copy_score = copy_score.squeeze(2)
+
         copy_score_initial = self.get_copy_score_initial(oov_counts)
-        copy_weights = torch.tanh(self.copy_proj(torch.bmm(src_map, encoder_out)))
-        copy_score = torch.bmm(copy_weights, decoder_output.permute(0, 2, 1)).squeeze(2)
-        copy_score += copy_score_initial
+        copy_score_initial.scatter_(1, src_tokens_with_oov, copy_score)
 
-        return copy_score
+        return copy_score_initial
 
     def get_copy_score_initial(self, oov_counts):
         copy_score_initial = []
