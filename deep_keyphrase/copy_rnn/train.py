@@ -13,8 +13,10 @@ def train(args):
     vocab2id = load_vocab(args.vocab_path, args.vocab_size)
 
     model = CopyRNN(args, vocab2id)
+    if torch.cuda.is_available():
+        model = model.cuda()
     loss_func = nn.NLLLoss(ignore_index=vocab2id[PAD_WORD])
-    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    optimizer = optim.SGD(model.parameters(), lr=0.001)  # , momentum=0.9)
 
     train_loader = CopyRnnDataLoader(args.filename,
                                      vocab2id,
@@ -36,21 +38,27 @@ def train(args):
             hidden_state = None
             for target_index in range(args.max_target_len):
                 prev_output_tokens = targets[:, target_index].unsqueeze(1)
-                prev_output_lens = torch.tensor([1] * batch_size, dtype=torch.int64)
                 true_indices = targets[:, target_index + 1]
                 decoder_prob, encoder_output, decoder_state, hidden_state = model(src_tokens,
                                                                                   src_lens,
                                                                                   prev_output_tokens,
-                                                                                  prev_output_lens,
                                                                                   encoder_output,
                                                                                   src_tokens_with_oov,
                                                                                   oov_counts,
                                                                                   decoder_state,
                                                                                   hidden_state)
                 loss += loss_func(decoder_prob, true_indices)
+                # print(accuracy(decoder_prob, true_indices, vocab2id[PAD_WORD]))
             loss.backward()
             optimizer.step()
             print(loss.data.numpy())
+
+
+def accuracy(probs, true_indices, pad_idx):
+    pred_indices = torch.argmax(probs, dim=1)
+    mask = torch.eq(true_indices, torch.ones(*true_indices.size(), dtype=torch.int64) * pad_idx)
+    tp_result = torch.eq(pred_indices, true_indices).type(torch.int) * (~mask).type(torch.int)
+    return torch.sum(tp_result).numpy() / true_indices.numel()
 
 
 def main():
@@ -65,7 +73,8 @@ def main():
     parser.add_argument("-src_hidden_size", type=int, default=100, help='')
     parser.add_argument("-target_hidden_size", type=int, default=100, help='')
     parser.add_argument("-epochs", type=int, default=10, help='')
-    parser.add_argument("-batch_size", type=int, default=32, help='')
+    parser.add_argument("-batch_size", type=int, default=128, help='')
+    parser.add_argument("-dropout", type=float, default=0.5, help='')
     args = parser.parse_args()
     train(args)
 

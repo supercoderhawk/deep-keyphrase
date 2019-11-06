@@ -51,44 +51,51 @@ class CopyRNN(nn.Module):
         max_len = args.max_src_len
         embed_size = args.embed_size
         embedding = nn.Embedding(len(vocab2id), embed_size, vocab2id[PAD_WORD])
-        self.encoder = CopyRnnEncoder(vocab2id, embedding, src_hidden_size, False, 0.5, 0.5)
+        self.encoder = CopyRnnEncoder(vocab2id, embedding, src_hidden_size, False, args.dropout)
         self.decoder = CopyRnnDecoder(vocab2id,
                                       embedding,
                                       target_hidden_size,
                                       src_hidden_size,
                                       max_len,
                                       False,
-                                      0.5,
+                                      args.dropout,
                                       max_oov_count)
 
-    def forward(self, src_tokens, src_lens, prev_output_tokens, prev_output_lens, encoder_output,
+    def forward(self, src_tokens, src_lens, prev_output_tokens, encoder_output,
                 src_tokens_with_oov, oov_counts, decoder_state, hidden_state):
+        if torch.cuda.is_available():
+            src_tokens = src_tokens.cuda()
+            src_lens = src_lens.cuda()
+            prev_output_tokens = prev_output_tokens.cuda()
+            src_tokens_with_oov = src_tokens_with_oov.cuda()
+            oov_counts = oov_counts.cuda()
+            decoder_state = decoder_state.cuda()
         if encoder_output is None:
             encoder_output = self.encoder(src_tokens, src_lens)
             hidden_state = encoder_output['encoder_hidden']
 
         decoder_prob, decoder_state, hidden_state = self.decoder(prev_output_tokens,
-                                                                 prev_output_lens,
                                                                  encoder_output,
                                                                  decoder_state,
                                                                  hidden_state,
                                                                  src_tokens,
                                                                  src_tokens_with_oov,
                                                                  oov_counts)
+        if torch.cuda.is_available():
+            decoder_prob = decoder_prob.cpu()
         return decoder_prob, encoder_output, decoder_state, hidden_state
 
 
 class CopyRnnEncoder(nn.Module):
     def __init__(self, vocab2id, embedding, hidden_size,
-                 bidirectional, dropout_in, dropout_out):
+                 bidirectional, dropout):
         super().__init__()
         embed_dim = embedding.embedding_dim
         self.embed_dim = embed_dim
         self.embedding = embedding
         self.hidden_size = hidden_size
         self.bidirectional = bidirectional
-        self.dropout_in = dropout_in
-        self.dropout_out = dropout_out
+        self.dropout = dropout
         self.num_layers = 1
         self.pad_idx = vocab2id[PAD_WORD]
 
@@ -98,7 +105,7 @@ class CopyRnnEncoder(nn.Module):
             num_layers=1,
             bidirectional=bidirectional,
             batch_first=True,
-            # dropout=dropout_in
+            dropout=self.dropout
         )
 
     def forward(self, src_tokens, src_lengths=None, **kwargs):
@@ -146,14 +153,14 @@ class CopyRnnDecoder(nn.Module):
             num_layers=1,
             bidirectional=bidirectional,
             batch_first=True,
-            # dropout=dropout
+            dropout=self.dropout
         )
         self.attn_layer = Attention(src_hidden_size, hidden_size)
         self.copy_proj = nn.Linear(src_hidden_size, hidden_size, bias=False)
         self.input_copy_proj = nn.Linear(src_hidden_size, hidden_size, bias=False)
         self.generate_proj = nn.Linear(hidden_size, self.vocab_size, bias=False)
 
-    def forward(self, prev_output_tokens, prev_output_lens, encoder_output_dict, prev_context_state,
+    def forward(self, prev_output_tokens, encoder_output_dict, prev_context_state,
                 prev_rnn_state,
                 src_tokens, src_tokens_with_oov, oov_counts):
         """
@@ -168,9 +175,10 @@ class CopyRnnDecoder(nn.Module):
         :return:
         """
         batch_size = len(src_tokens)
-
         prev_output_tokens = torch.as_tensor(prev_output_tokens, dtype=torch.int64)
-        prev_output_lens = torch.as_tensor(prev_output_lens, dtype=torch.int64)
+        if torch.cuda.is_available():
+            prev_output_tokens = prev_output_tokens.cuda()
+
         encoder_output = encoder_output_dict['encoder_output']
         encoder_output_mask = encoder_output_dict['encoder_padding_mask']
 
@@ -182,23 +190,19 @@ class CopyRnnDecoder(nn.Module):
         aggregate_weight = torch.tanh(self.input_copy_proj(torch.mul(mask, encoder_output)))
         copy_weight = torch.softmax(torch.bmm(aggregate_weight, prev_context_state.unsqueeze(2)), 1)
         # B x L x 1
-        # aggregate_weight
+        #
         copy_state = torch.sum(torch.mul(copy_weight, encoder_output), dim=1).unsqueeze(1)
 
         src_embed = self.embedding(prev_output_tokens)
         decoder_input = torch.cat([src_embed, copy_state], dim=2)
 
-        packed_src_embed = nn.utils.rnn.pack_padded_sequence(decoder_input,
-                                                             prev_output_lens,
-                                                             batch_first=True)
-        h, c = prev_rnn_state
-        packed_outs, (h, c) = self.lstm(packed_src_embed, (h, c))
-        rnn_output, _ = nn.utils.rnn.pad_packed_sequence(packed_outs,
-                                                         padding_value=self.pad_idx,
-                                                         batch_first=True)
+        rnn_output, rnn_state = self.lstm(decoder_input, prev_rnn_state)
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
         generate_logits = self.generate_proj(attn_output).squeeze(1)
-        generate_logits = torch.cat([generate_logits, torch.zeros(batch_size, self.max_oov_len)], dim=1)
+        generate_oov_logits = torch.zeros(batch_size, self.max_oov_len)
+        if torch.cuda.is_available():
+            generate_oov_logits = generate_oov_logits.cuda()
+        generate_logits = torch.cat([generate_logits, generate_oov_logits], dim=1)
         copy_logits = self.get_copy_score(encoder_output,
                                           src_tokens_with_oov,
                                           oov_counts,
@@ -206,7 +210,7 @@ class CopyRnnDecoder(nn.Module):
         total_logit = generate_logits + copy_logits
         total_prob = torch.softmax(total_logit, 1)
 
-        return total_prob, attn_output.squeeze(1), (h, c)
+        return total_prob, attn_output.squeeze(1), rnn_state
 
     def get_copy_score(self, encoder_out, src_tokens_with_oov, oov_counts, decoder_output):
         copy_score = torch.bmm(torch.tanh(self.copy_proj(encoder_out)), decoder_output.permute(0, 2, 1))
@@ -228,4 +232,6 @@ class CopyRnnDecoder(nn.Module):
                 copy_score_initial.append(torch.cat([prefix, suffix]))
 
         copy_score_initial = torch.stack(copy_score_initial)
+        if torch.cuda.is_available():
+            copy_score_initial = copy_score_initial.cuda()
         return copy_score_initial
