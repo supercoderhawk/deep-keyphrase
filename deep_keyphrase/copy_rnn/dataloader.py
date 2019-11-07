@@ -2,12 +2,12 @@
 import numpy as np
 import torch
 from torch.autograd import Variable
-from pysenal import read_jsonline_lazy
+from pysenal import read_jsonline_lazy, get_chunk
 from deep_keyphrase.utils.constants import *
 
 
 class CopyRnnDataLoader(object):
-    def __init__(self, filename, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len):
+    def __init__(self, filename, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len, mode):
         self.filename = filename
         self.vocab2id = vocab2id
         self.vocab_size = len(self.vocab2id)
@@ -15,6 +15,7 @@ class CopyRnnDataLoader(object):
         self.max_src_len = max_src_len
         self.max_oov_count = max_oov_count
         self.max_target_len = max_target_len
+        self.mode = mode
 
     def __iter__(self):
         return iter(CopyRnnDataIterator(self))
@@ -50,7 +51,8 @@ class CopyRnnDataLoader(object):
         final_item = {'tokens': token_ids,
                       'tokens_with_oov': token_ids_with_oov,
                       'targets': target_ids_list,
-                      'oov_count': len(oov_list)}
+                      'oov_count': len(oov_list),
+                      'oov_list': oov_list}
         return final_item
 
 
@@ -61,6 +63,12 @@ class CopyRnnDataIterator(object):
         self.batch_size = loader.batch_size
 
     def __iter__(self):
+        if self.loader.mode == 'train':
+            yield from self.iter_train()
+        else:
+            yield from self.iter_inference()
+
+    def iter_train(self):
         batch = []
         for item in read_jsonline_lazy(self.filename):
             item = self.loader.collate_fn(item)
@@ -75,15 +83,20 @@ class CopyRnnDataIterator(object):
                                 'target': phrase}
                 flatten_items.append(one2one_item)
             if len(batch) + len(flatten_items) > self.batch_size:
-                yield self.padding_batch(batch)
+                yield self.padding_batch_train(batch)
                 batch = flatten_items
             else:
                 batch.extend(flatten_items)
-
         if batch:
-            yield self.padding_batch(batch)
+            yield self.padding_batch_train(batch)
 
-    def padding_batch(self, batch):
+    def iter_inference(self):
+        chunk_gen = get_chunk(read_jsonline_lazy(self.filename), self.batch_size)
+        for item_chunk in chunk_gen:
+            item_chunk = [self.loader.collate_fn(item) for item in item_chunk]
+            yield self.padding_batch_inference(item_chunk)
+
+    def padding_batch_train(self, batch):
         name2max_len = {'tokens': self.loader.max_src_len,
                         'tokens_with_oov': self.loader.max_src_len,
                         'target': self.loader.max_target_len + 1}
@@ -99,6 +112,26 @@ class CopyRnnDataIterator(object):
                 pad_data = torch.tensor(data, dtype=torch.int64)
             result[key] = pad_data
 
+        return result
+
+    def padding_batch_inference(self, batch):
+        name2max_len = {'tokens': self.loader.max_src_len,
+                        'tokens_with_oov': self.loader.max_src_len}
+        padding_key = {'tokens', 'tokens_with_oov','oov_count'}
+        result = {}
+        for key in batch[0].keys():
+            data = [b[key] for b in batch]
+            if key in padding_key:
+                if key in name2max_len:
+                    pad_data, pad_data_len = self.__padding(data, name2max_len[key])
+                    if key == 'tokens':
+                        src_tensor = torch.tensor(pad_data_len, dtype=torch.int64)
+                        result['tokens_len'] = src_tensor
+                else:
+                    pad_data = torch.tensor(data, dtype=torch.int64)
+                result[key] = pad_data
+            else:
+                result[key] = data
         return result
 
     def __padding(self, x_raw, max_len):
