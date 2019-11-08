@@ -11,7 +11,7 @@ class Attention(nn.Module):
         self.output_dim = output_dim
         self.score_mode = score_mode
         if self.score_mode == 'general':
-            self.attn = nn.Linear(self.input_dim, self.output_dim, bias=False)
+            self.attn = nn.Linear(self.output_dim, self.input_dim, bias=False)
         self.output_proj = nn.Linear(self.input_dim + self.output_dim, self.output_dim)
 
     def score(self, query, key, encoder_padding_mask):
@@ -22,9 +22,7 @@ class Attention(nn.Module):
             raise ValueError('value error')
         # mask input padding to -Inf, they will be zero after softmax.
         if encoder_padding_mask is not None:
-            attn_weights = attn_weights.float().masked_fill_(
-                encoder_padding_mask,
-                float('-inf'))
+            attn_weights.masked_fill_(encoder_padding_mask, float('-inf'))
         attn_weights = torch.softmax(attn_weights, 1)
         return attn_weights
 
@@ -38,7 +36,7 @@ class Attention(nn.Module):
         """
         attn_weights = self.score(decoder_output, encoder_outputs, encoder_padding_mask)
         context_embed = torch.bmm(attn_weights.unsqueeze(1), encoder_outputs)
-        attn_outputs = torch.tanh(self.output_proj(torch.cat([decoder_output, context_embed], dim=2)))
+        attn_outputs = torch.tanh(self.output_proj(torch.cat([context_embed, decoder_output], dim=2)))
         return attn_outputs, attn_weights
 
 
@@ -108,12 +106,12 @@ class CopyRnnEncoder(nn.Module):
             dropout=self.dropout
         )
 
-    def forward(self, src_tokens, src_lengths=None, **kwargs):
+    def forward(self, src_tokens, src_lengths, **kwargs):
         batch_size = len(src_tokens)
         src_embed = self.embedding(src_tokens)
         total_length = src_embed.size(1)
         packed_src_embed = nn.utils.rnn.pack_padded_sequence(src_embed,
-                                                             src_lengths.data.tolist(),
+                                                             src_lengths,
                                                              batch_first=True,
                                                              enforce_sorted=False)
         state_size = (self.num_layers, batch_size, self.hidden_size)
@@ -127,12 +125,12 @@ class CopyRnnEncoder(nn.Module):
         encoder_padding_mask = src_tokens.eq(self.pad_idx)
         output = {'encoder_output': hidden_states,
                   'encoder_padding_mask': encoder_padding_mask,
-                  'encoder_hidden': (final_hiddens, final_cells)}
+                  'encoder_hidden': [final_hiddens, final_cells]}
         return output
 
 
 class CopyRnnDecoder(nn.Module):
-    def __init__(self, vocab2id, embedding, hidden_size, src_hidden_size, max_len,
+    def __init__(self, vocab2id, embedding, target_hidden_size, src_hidden_size, max_len,
                  bidirectional, dropout, max_oov_len
                  ):
         super().__init__()
@@ -142,23 +140,24 @@ class CopyRnnDecoder(nn.Module):
         self.vocab_size = vocab_size
         self.embed_size = embed_dim
         self.embedding = embedding
-        self.hidden_size = hidden_size
+        self.target_hidden_size = target_hidden_size
         self.src_hidden_size = src_hidden_size
         self.max_len = max_len
         self.max_oov_len = max_oov_len
+        self.dropout = dropout
         self.pad_idx = vocab2id[PAD_WORD]
         self.lstm = nn.LSTM(
             input_size=embed_dim + src_hidden_size,
-            hidden_size=hidden_size,
+            hidden_size=target_hidden_size,
             num_layers=1,
             bidirectional=bidirectional,
             batch_first=True,
             dropout=self.dropout
         )
-        self.attn_layer = Attention(src_hidden_size, hidden_size)
-        self.copy_proj = nn.Linear(src_hidden_size, hidden_size, bias=False)
-        self.input_copy_proj = nn.Linear(src_hidden_size, hidden_size, bias=False)
-        self.generate_proj = nn.Linear(hidden_size, self.vocab_size, bias=False)
+        self.attn_layer = Attention(src_hidden_size, target_hidden_size)
+        self.copy_proj = nn.Linear(src_hidden_size, target_hidden_size, bias=False)
+        self.input_copy_proj = nn.Linear(src_hidden_size, target_hidden_size, bias=False)
+        self.generate_proj = nn.Linear(target_hidden_size, self.vocab_size, bias=False)
 
     def forward(self, prev_output_tokens, encoder_output_dict, prev_context_state,
                 prev_rnn_state,
@@ -182,21 +181,17 @@ class CopyRnnDecoder(nn.Module):
         encoder_output = encoder_output_dict['encoder_output']
         encoder_output_mask = encoder_output_dict['encoder_padding_mask']
 
-        # mask : B x L x 1
-        mask = torch.eq(prev_output_tokens.repeat(1, self.max_len), src_tokens).type_as(encoder_output)
-        mask = mask.unsqueeze(2)
-
-        # B x 1 x SH
-        aggregate_weight = torch.tanh(self.input_copy_proj(torch.mul(mask, encoder_output)))
-        copy_weight = torch.softmax(torch.bmm(aggregate_weight, prev_context_state.unsqueeze(2)), 1)
-        # B x L x 1
-        #
-        copy_state = torch.sum(torch.mul(copy_weight, encoder_output), dim=1).unsqueeze(1)
+        copy_state = self.get_attn_read_input(encoder_output,
+                                              prev_context_state,
+                                              prev_output_tokens,
+                                              src_tokens)
 
         src_embed = self.embedding(prev_output_tokens)
         decoder_input = torch.cat([src_embed, copy_state], dim=2)
 
         rnn_output, rnn_state = self.lstm(decoder_input, prev_rnn_state)
+        # attn_output is the final hidden state of decoder layer
+        # attn_output B x 1 x TH
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
         generate_logits = self.generate_proj(attn_output).squeeze(1)
         generate_oov_logits = torch.zeros(batch_size, self.max_oov_len)
@@ -205,33 +200,46 @@ class CopyRnnDecoder(nn.Module):
         generate_logits = torch.cat([generate_logits, generate_oov_logits], dim=1)
         copy_logits = self.get_copy_score(encoder_output,
                                           src_tokens_with_oov,
-                                          oov_counts,
-                                          attn_output)
-        total_logit = generate_logits + copy_logits
-        total_prob = torch.softmax(total_logit, 1)
+                                          attn_output,
+                                          encoder_output_mask)
+        total_logit = torch.exp(generate_logits) + copy_logits
 
+        total_prob = total_logit / torch.sum(total_logit, 1).unsqueeze(1)
+        total_prob = torch.log(total_prob)
         return total_prob, attn_output.squeeze(1), rnn_state
 
-    def get_copy_score(self, encoder_out, src_tokens_with_oov, oov_counts, decoder_output):
-        copy_score = torch.bmm(torch.tanh(self.copy_proj(encoder_out)), decoder_output.permute(0, 2, 1))
-        copy_score = copy_score.squeeze(2)
+    def get_attn_read_input(self, encoder_output, prev_context_state, prev_output_tokens, src_tokens):
+        """
+        build CopyNet decoder input of "attentive read" part.
+        :param encoder_output:
+        :param prev_context_state:
+        :param prev_output_tokens:
+        :param src_tokens:
+        :return:
+        """
+        # mask : B x L x 1
+        mask_bool = torch.eq(prev_output_tokens.repeat(1, self.max_len), src_tokens).unsqueeze(2)
+        mask = mask_bool.type_as(encoder_output)
+        # B x L x SH
+        aggregate_weight = torch.tanh(self.input_copy_proj(torch.mul(mask, encoder_output)))
+        # when all prev_tokens are not in src_tokens, don't execute mask -inf to avoid nan result in softmax
+        no_zero_mask = ((mask != 0).sum(dim=1) != 0).repeat(1, self.max_len).unsqueeze(2)
+        input_copy_logit_mask = no_zero_mask * mask_bool
+        input_copy_logit = torch.bmm(aggregate_weight, prev_context_state.unsqueeze(2))
+        input_copy_logit.masked_fill_(input_copy_logit_mask, float('-inf'))
+        input_copy_weight = torch.softmax(input_copy_logit.squeeze(2), 1)
+        # B x 1 x L
+        copy_state = torch.bmm(input_copy_weight.unsqueeze(1), encoder_output)
+        return copy_state
 
-        copy_score_initial = self.get_copy_score_initial(oov_counts)
-        copy_score_initial.scatter_(1, src_tokens_with_oov, copy_score)
-
-        return copy_score_initial
-
-    def get_copy_score_initial(self, oov_counts):
-        copy_score_initial = []
-        for oov_count in oov_counts:
-            if oov_count == self.max_oov_len:
-                copy_score_initial.append(torch.zeros(self.vocab_size + self.max_oov_len))
-            else:
-                prefix = torch.zeros(self.vocab_size + oov_count)
-                suffix = torch.ones(self.max_oov_len - oov_count) * float('-inf')
-                copy_score_initial.append(torch.cat([prefix, suffix]))
-
-        copy_score_initial = torch.stack(copy_score_initial)
+    def get_copy_score(self, encoder_out, src_tokens_with_oov, decoder_output, encoder_output_mask):
+        # copy_score: B x L
+        copy_score_in_seq = torch.bmm(torch.tanh(self.copy_proj(encoder_out)),
+                                      decoder_output.permute(0, 2, 1)).squeeze(2)
+        copy_score_in_seq.masked_fill_(encoder_output_mask, float('-inf'))
+        copy_score_in_seq = torch.exp(copy_score_in_seq)
+        copy_score_in_vocab = torch.zeros(len(encoder_out), self.vocab_size + self.max_oov_len)
         if torch.cuda.is_available():
-            copy_score_initial = copy_score_initial.cuda()
-        return copy_score_initial
+            copy_score_in_vocab = copy_score_in_vocab.cuda()
+        copy_score_in_vocab.scatter_add_(1, src_tokens_with_oov, copy_score_in_seq)
+        return copy_score_in_vocab
