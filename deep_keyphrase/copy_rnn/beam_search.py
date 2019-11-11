@@ -1,5 +1,7 @@
 # -*- coding: UTF-8 -*-
 import torch
+from deep_keyphrase.copy_rnn.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
+                                                OOV_COUNT, OOV_LIST)
 
 
 class BeamSearch(object):
@@ -10,31 +12,28 @@ class BeamSearch(object):
         self.max_target_len = max_target_len
         self.bos_idx = bos_idx
 
-    def beam_search(self, src_tokens, src_lens, src_tokens_with_oov, oov_counts, oov_list):
+    def beam_search(self, src_dict):
         """
         generate beam search result
         main idea: inference input Batch x beam size, select
-        :param src_tokens:
-        :param src_lens:
-        :param src_tokens_with_oov:
-        :param oov_counts:
-        :param oov_list:
+        :param src_dict:
         :return:
         """
-        batch_size = len(src_tokens)
+        oov_list = src_dict[OOV_LIST]
+        batch_size = len(src_dict[TOKENS])
         encoder_output_dict = None
         hidden_state = None
-        prev_output_tokens = [[self.bos_idx]] * batch_size
+        prev_output_tokens = torch.tensor([[self.bos_idx]] * batch_size, dtype=torch.int64)
         decoder_state = torch.zeros(batch_size, self.model.decoder.target_hidden_size)
+        if torch.cuda.is_available():
+            prev_output_tokens = prev_output_tokens.cuda()
+            decoder_state = decoder_state.cuda()
 
-        model_output = self.model(src_tokens,
-                                  src_lens,
-                                  prev_output_tokens,
-                                  encoder_output_dict,
-                                  src_tokens_with_oov,
-                                  oov_counts,
-                                  decoder_state,
-                                  hidden_state)
+        model_output = self.model(src_dict=src_dict,
+                                  prev_output_tokens=prev_output_tokens,
+                                  encoder_output_dict=encoder_output_dict,
+                                  prev_decoder_state=decoder_state,
+                                  prev_hidden_state=hidden_state)
         decoder_prob, encoder_output_dict, decoder_state, hidden_state = model_output
         prev_best_probs, prev_best_index = torch.topk(decoder_prob, self.beam_size, 1)
         prev_decoder_state = decoder_state.repeat(self.beam_size, 1)
@@ -44,17 +43,15 @@ class BeamSearch(object):
         encoder_output_dict = self.expand_encoder_output(encoder_output_dict)
         beam_batch_size = self.beam_size * batch_size
         beam_search_best_probs = torch.abs(prev_best_probs)
+        for k in [TOKENS, TOKENS_LENS, TOKENS_OOV, OOV_COUNT]:
+            src_dict[k] = src_dict[k].repeat(self.beam_size, 1)
 
         for target_idx in range(self.max_target_len):
-            model_output = self.model(src_tokens.repeat(self.beam_size, 1),
-                                      src_lens.repeat(self.beam_size, 1),
-                                      prev_best_index.view(-1, 1),
-                                      encoder_output_dict,
-                                      src_tokens_with_oov.repeat(self.beam_size, 1),
-                                      oov_counts.repeat(self.beam_size),
-                                      prev_decoder_state,
-                                      prev_hidden_state
-                                      )
+            model_output = self.model(src_dict=src_dict,
+                                      prev_output_tokens=prev_best_index.view(-1, 1),
+                                      encoder_output_dict=encoder_output_dict,
+                                      prev_decoder_state=prev_decoder_state,
+                                      prev_hidden_state=prev_hidden_state)
             decoder_prob, encoder_output_dict, decoder_state, hidden_state = model_output
 
             beam_search_probs = beam_search_best_probs.flatten().unsqueeze(1)
@@ -66,18 +63,27 @@ class BeamSearch(object):
 
             select_idx_factor = torch.tensor(range(batch_size)) * self.beam_size
             select_idx_factor = select_idx_factor.unsqueeze(1).repeat(1, self.beam_size)
-
+            if torch.cuda.is_available():
+                select_idx_factor = select_idx_factor.cuda()
             state_select_idx = (top_token_index.flatten() + 1) // decoder_prob.size(1)
             state_select_idx += select_idx_factor.flatten()
-
+            # reorder previous variables according to
             prev_decoder_state = decoder_state.index_select(0, state_select_idx)
             prev_best_index = top_token_index % decoder_prob.size(1)
             prev_hidden_state[0] = hidden_state[0].index_select(1, state_select_idx)
             prev_hidden_state[1] = hidden_state[1].index_select(1, state_select_idx)
+            result_sequences = result_sequences.view(batch_size * self.beam_size, -1)
+            result_sequences = result_sequences.index_select(0, state_select_idx)
+            result_sequences = result_sequences.view(batch_size, self.beam_size, -1)
+
             result_sequences = torch.cat([result_sequences, prev_best_index.unsqueeze(2)], dim=2)
             prev_best_index = prev_best_index.view(beam_batch_size, -1)
-
-        result_sequences = result_sequences.numpy().tolist()
+        if torch.cuda.is_available():
+            result_sequences = result_sequences.cpu().numpy().tolist()
+        else:
+            result_sequences = result_sequences.numpy().tolist()
+        for k in [TOKENS, TOKENS_LENS, TOKENS_OOV, OOV_COUNT]:
+            src_dict[k] = src_dict[k].narrow(0, 0, batch_size)
         results = []
         for batch in result_sequences:
             beam_list = []
@@ -114,22 +120,26 @@ class BeamSearch(object):
         encoder_output_dict['encoder_hidden'] = encoder_hidden_state
         return encoder_output_dict
 
-    def greedy_search(self, src_tokens, src_lens, src_tokens_with_oov, oov_counts, oov_list):
-        batch_size = len(src_tokens)
+    def greedy_search(self, src_dict):
+        """
+
+        :param src_dict:
+        :return:
+        """
+        oov_list = src_dict[OOV_LIST]
+        batch_size = len(src_dict[TOKENS])
         encoder_output_dict = None
         hidden_state = None
         prev_output_tokens = [[self.bos_idx]] * batch_size
         decoder_state = torch.zeros(batch_size, self.model.decoder.target_hidden_size)
         result_seqs = None
+
         for target_idx in range(self.max_target_len):
-            model_output = self.model(src_tokens,
-                                      src_lens,
-                                      prev_output_tokens,
-                                      encoder_output_dict,
-                                      src_tokens_with_oov,
-                                      oov_counts,
-                                      decoder_state,
-                                      hidden_state)
+            model_output = self.model(src_dict=src_dict,
+                                      prev_output_tokens=prev_output_tokens,
+                                      encoder_output_dict=encoder_output_dict,
+                                      prev_decoder_state=decoder_state,
+                                      prev_hidden_state=hidden_state)
             decoder_prob, encoder_output_dict, decoder_state, hidden_state = model_output
             best_probs, best_indices = torch.topk(decoder_prob, 1, dim=1)
             if result_seqs is None:
@@ -141,7 +151,6 @@ class BeamSearch(object):
         for batch in result_seqs.numpy().tolist():
             phrase = []
             for idx in batch:
-
                 if idx in self.id2vocab:
                     phrase.append(self.id2vocab[idx])
                 else:
