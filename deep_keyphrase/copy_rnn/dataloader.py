@@ -5,6 +5,14 @@ from torch.autograd import Variable
 from pysenal import read_jsonline_lazy, get_chunk
 from deep_keyphrase.utils.constants import *
 
+TOKENS = 'tokens'
+TOKENS_LENS = 'tokens_len'
+TOKENS_OOV = 'tokens_with_oov'
+OOV_COUNT = 'oov_count'
+OOV_LIST = 'oov_list'
+TARGET_LIST = 'targets'
+TARGET = 'target'
+
 
 class CopyRnnDataLoader(object):
     def __init__(self, filename, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len, mode):
@@ -48,11 +56,11 @@ class CopyRnnDataLoader(object):
             target_ids.append(self.vocab2id[EOS_WORD])
             target_ids_list.append(target_ids)
 
-        final_item = {'tokens': token_ids,
-                      'tokens_with_oov': token_ids_with_oov,
-                      'targets': target_ids_list,
-                      'oov_count': len(oov_list),
-                      'oov_list': oov_list}
+        final_item = {TOKENS: token_ids,
+                      TOKENS_OOV: token_ids_with_oov,
+                      TARGET_LIST: target_ids_list,
+                      OOV_COUNT: len(oov_list),
+                      OOV_LIST: oov_list}
         return final_item
 
 
@@ -72,15 +80,15 @@ class CopyRnnDataIterator(object):
         batch = []
         for item in read_jsonline_lazy(self.filename):
             item = self.loader.collate_fn(item)
-            tokens = item['tokens']
-            token_with_oov = item['tokens_with_oov']
-            oov_count = item['oov_count']
+            tokens = item[TOKENS]
+            token_with_oov = item[TOKENS_OOV]
+            oov_count = item[OOV_COUNT]
             flatten_items = []
-            for phrase in item['targets']:
-                one2one_item = {'tokens': tokens,
-                                'tokens_with_oov': token_with_oov,
-                                'oov_count': oov_count,
-                                'target': phrase}
+            for phrase in item[TARGET_LIST]:
+                one2one_item = {TOKENS: tokens,
+                                TOKENS_OOV: token_with_oov,
+                                OOV_COUNT: oov_count,
+                                TARGET: phrase}
                 flatten_items.append(one2one_item)
             if len(batch) + len(flatten_items) > self.batch_size:
                 yield self.padding_batch_train(batch)
@@ -97,17 +105,17 @@ class CopyRnnDataIterator(object):
             yield self.padding_batch_inference(item_chunk)
 
     def padding_batch_train(self, batch):
-        name2max_len = {'tokens': self.loader.max_src_len,
-                        'tokens_with_oov': self.loader.max_src_len,
-                        'target': self.loader.max_target_len + 1}
+        name2max_len = {TOKENS: self.loader.max_src_len,
+                        TOKENS_OOV: self.loader.max_src_len,
+                        TARGET: self.loader.max_target_len + 1}
         result = {}
         for key in batch[0].keys():
             data = [b[key] for b in batch]
             if key in name2max_len:
                 pad_data, pad_data_len = self.__padding(data, name2max_len[key])
-                if key == 'tokens':
+                if key == TOKENS:
                     src_tensor = torch.tensor(pad_data_len, dtype=torch.int64)
-                    result['tokens_len'] = src_tensor
+                    result[TOKENS_LENS] = src_tensor
             else:
                 pad_data = torch.tensor(data, dtype=torch.int64)
             result[key] = pad_data
@@ -115,9 +123,9 @@ class CopyRnnDataIterator(object):
         return result
 
     def padding_batch_inference(self, batch):
-        name2max_len = {'tokens': self.loader.max_src_len,
-                        'tokens_with_oov': self.loader.max_src_len}
-        padding_key = {'tokens', 'tokens_with_oov','oov_count'}
+        name2max_len = {TOKENS: self.loader.max_src_len,
+                        TOKENS_OOV: self.loader.max_src_len}
+        padding_key = {TOKENS, TOKENS_OOV, OOV_COUNT}
         result = {}
         for key in batch[0].keys():
             data = [b[key] for b in batch]

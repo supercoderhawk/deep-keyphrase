@@ -2,9 +2,12 @@
 import torch.nn as nn
 import torch
 from deep_keyphrase.utils.constants import *
-
+from deep_keyphrase.copy_rnn.dataloader import TOKENS, TOKENS_OOV, TOKENS_LENS, OOV_COUNT
 
 class Attention(nn.Module):
+    """
+    implement attention
+    """
     def __init__(self, input_dim, output_dim, score_mode='general'):
         super().__init__()
         self.input_dim = input_dim
@@ -59,29 +62,28 @@ class CopyRNN(nn.Module):
                                       args.dropout,
                                       max_oov_count)
 
-    def forward(self, src_tokens, src_lens, prev_output_tokens, encoder_output,
-                src_tokens_with_oov, oov_counts, decoder_state, hidden_state):
+    def forward(self, src_dict, prev_output_tokens, encoder_output_dict,
+                prev_decoder_state, prev_hidden_state):
         if torch.cuda.is_available():
-            src_tokens = src_tokens.cuda()
-            src_lens = src_lens.cuda()
+            src_dict[TOKENS] = src_dict[TOKENS].cuda()
+            src_dict[TOKENS_LENS] = src_dict[TOKENS_LENS].cuda()
+            src_dict[TOKENS_OOV] = src_dict[TOKENS_OOV].cuda()
+            src_dict[OOV_COUNT] = src_dict[OOV_COUNT].cuda()
             prev_output_tokens = prev_output_tokens.cuda()
-            src_tokens_with_oov = src_tokens_with_oov.cuda()
-            oov_counts = oov_counts.cuda()
-            decoder_state = decoder_state.cuda()
-        if encoder_output is None:
-            encoder_output = self.encoder(src_tokens, src_lens)
-            hidden_state = encoder_output['encoder_hidden']
+            # src_tokens_with_oov = src_tokens_with_oov.cuda()
+            # oov_counts = oov_counts.cuda()
+            prev_decoder_state = prev_decoder_state.cuda()
+        if encoder_output_dict is None:
+            encoder_output_dict = self.encoder(src_dict)
+            prev_hidden_state = encoder_output_dict['encoder_hidden']
 
-        decoder_prob, decoder_state, hidden_state = self.decoder(prev_output_tokens,
-                                                                 encoder_output,
-                                                                 decoder_state,
-                                                                 hidden_state,
-                                                                 src_tokens,
-                                                                 src_tokens_with_oov,
-                                                                 oov_counts)
-        if torch.cuda.is_available():
-            decoder_prob = decoder_prob.cpu()
-        return decoder_prob, encoder_output, decoder_state, hidden_state
+        decoder_prob, prev_decoder_state, prev_hidden_state = self.decoder(
+            src_dict=src_dict,
+            prev_output_tokens=prev_output_tokens,
+            encoder_output_dict=encoder_output_dict,
+            prev_context_state=prev_decoder_state,
+            prev_rnn_state=prev_hidden_state)
+        return decoder_prob, encoder_output_dict, prev_decoder_state, prev_hidden_state
 
 
 class CopyRnnEncoder(nn.Module):
@@ -106,7 +108,9 @@ class CopyRnnEncoder(nn.Module):
             dropout=self.dropout
         )
 
-    def forward(self, src_tokens, src_lengths, **kwargs):
+    def forward(self, src_dict, **kwargs):
+        src_tokens = src_dict[TOKENS]
+        src_lengths = src_dict[TOKENS_LENS]
         batch_size = len(src_tokens)
         src_embed = self.embedding(src_tokens)
         total_length = src_embed.size(1)
@@ -160,19 +164,18 @@ class CopyRnnDecoder(nn.Module):
         self.generate_proj = nn.Linear(target_hidden_size, self.vocab_size, bias=False)
 
     def forward(self, prev_output_tokens, encoder_output_dict, prev_context_state,
-                prev_rnn_state,
-                src_tokens, src_tokens_with_oov, oov_counts):
+                prev_rnn_state, src_dict):
         """
 
         :param prev_output_tokens: B x 1
-        :param prev_output_lens: B x 1
         :param encoder_output_dict:
         :param prev_context_state: B x TH
-        :param src_tokens: B x max_len
-        :param src_tokens_with_oov: B x max_len
-        :param oov_counts: B
+
         :return:
         """
+        src_tokens = src_dict[TOKENS]
+        src_tokens_with_oov = src_dict[TOKENS_OOV]
+        # oov_counts = src_dict['oov_count']
         batch_size = len(src_tokens)
         prev_output_tokens = torch.as_tensor(prev_output_tokens, dtype=torch.int64)
         if torch.cuda.is_available():
