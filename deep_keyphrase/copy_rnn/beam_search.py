@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 import torch
 from deep_keyphrase.copy_rnn.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
-                                                OOV_COUNT, OOV_LIST)
+                                                OOV_COUNT, OOV_LIST, EOS_WORD)
 
 
 class BeamSearch(object):
@@ -12,11 +12,12 @@ class BeamSearch(object):
         self.max_target_len = max_target_len
         self.bos_idx = bos_idx
 
-    def beam_search(self, src_dict):
+    def beam_search(self, src_dict, delimiter=None):
         """
         generate beam search result
         main idea: inference input Batch x beam size, select
         :param src_dict:
+        :param delimiter:
         :return:
         """
         oov_list = src_dict[OOV_LIST]
@@ -46,7 +47,7 @@ class BeamSearch(object):
         for k in [TOKENS, TOKENS_LENS, TOKENS_OOV, OOV_COUNT]:
             src_dict[k] = src_dict[k].repeat(self.beam_size, 1)
 
-        for target_idx in range(self.max_target_len):
+        for target_idx in range(1, self.max_target_len):
             model_output = self.model(src_dict=src_dict,
                                       prev_output_tokens=prev_best_index.view(-1, 1),
                                       encoder_output_dict=encoder_output_dict,
@@ -90,13 +91,19 @@ class BeamSearch(object):
             for beam in batch:
                 phrase = []
                 for idx in beam:
+                    if self.id2vocab[idx] == EOS_WORD:
+                        break
                     if idx in self.id2vocab:
                         phrase.append(self.id2vocab[idx])
                     else:
                         phrase.append(oov_list[idx - len(self.id2vocab)])
-                beam_list.append(''.join(phrase))
+
+                if delimiter is not None:
+                    phrase = delimiter.join(phrase)
+                if phrase not in beam_list:
+                    beam_list.append(phrase)
             results.append(beam_list)
-        print(results)
+
         return results
 
     def expand_encoder_output(self, encoder_output_dict):
@@ -120,10 +127,11 @@ class BeamSearch(object):
         encoder_output_dict['encoder_hidden'] = encoder_hidden_state
         return encoder_output_dict
 
-    def greedy_search(self, src_dict):
+    def greedy_search(self, src_dict, delimiter=None):
         """
 
         :param src_dict:
+        :param delimiter:
         :return:
         """
         oov_list = src_dict[OOV_LIST]
@@ -151,10 +159,14 @@ class BeamSearch(object):
         for batch in result_seqs.numpy().tolist():
             phrase = []
             for idx in batch:
+                if self.id2vocab[idx] == EOS_WORD:
+                    break
                 if idx in self.id2vocab:
                     phrase.append(self.id2vocab[idx])
                 else:
                     phrase.append(oov_list[idx - len(self.id2vocab)])
-            result.append(''.join(phrase))
-        print(result)
+            if delimiter is not None:
+                phrase = delimiter.join(phrase)
+            result.append(phrase)
+
         return result
