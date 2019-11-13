@@ -1,7 +1,6 @@
 # -*- coding: UTF-8 -*-
 import numpy as np
 import torch
-from torch.autograd import Variable
 from pysenal import read_jsonline_lazy, get_chunk
 from deep_keyphrase.utils.constants import *
 
@@ -12,11 +11,12 @@ OOV_COUNT = 'oov_count'
 OOV_LIST = 'oov_list'
 TARGET_LIST = 'targets'
 TARGET = 'target'
+RAW_BATCH = 'raw'
 
 
 class CopyRnnDataLoader(object):
-    def __init__(self, filename, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len, mode):
-        self.filename = filename
+    def __init__(self, data_source, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len, mode):
+        self.data_source = data_source
         self.vocab2id = vocab2id
         self.vocab_size = len(self.vocab2id)
         self.batch_size = batch_size
@@ -28,7 +28,7 @@ class CopyRnnDataLoader(object):
     def __iter__(self):
         return iter(CopyRnnDataIterator(self))
 
-    def collate_fn(self, item):
+    def collate_fn(self, item, is_inference=False):
         tokens = item['tokens']
         token_ids_with_oov = []
         token_ids = []
@@ -49,25 +49,29 @@ class CopyRnnDataLoader(object):
             else:
                 token_ids.append(idx)
                 token_ids_with_oov.append(idx)
-        for keyphrase in item['keyphrases']:
-            target_ids = [self.vocab2id[BOS_WORD]]
-            for token in keyphrase:
-                target_ids.append(self.vocab2id.get(token, self.vocab2id[UNK_WORD]))
-            target_ids.append(self.vocab2id[EOS_WORD])
-            target_ids_list.append(target_ids)
+        if not is_inference:
+            for keyphrase in item['keyphrases']:
+                target_ids = [self.vocab2id[BOS_WORD]]
+                for token in keyphrase:
+                    target_ids.append(self.vocab2id.get(token, self.vocab2id[UNK_WORD]))
+                target_ids.append(self.vocab2id[EOS_WORD])
+                target_ids_list.append(target_ids)
 
         final_item = {TOKENS: token_ids,
                       TOKENS_OOV: token_ids_with_oov,
-                      TARGET_LIST: target_ids_list,
                       OOV_COUNT: len(oov_list),
                       OOV_LIST: oov_list}
+        if is_inference:
+            final_item[RAW_BATCH] = item
+        else:
+            final_item[TARGET_LIST] = target_ids_list
         return final_item
 
 
 class CopyRnnDataIterator(object):
     def __init__(self, loader):
         self.loader = loader
-        self.filename = loader.filename
+        self.data_source = loader.data_source
         self.batch_size = loader.batch_size
 
     def __iter__(self):
@@ -76,9 +80,17 @@ class CopyRnnDataIterator(object):
         else:
             yield from self.iter_inference()
 
+    def load_data(self):
+        if isinstance(self.data_source, str):
+            return read_jsonline_lazy(self.data_source)
+        elif isinstance(self.data_source, list):
+            return iter(self.data_source)
+        else:
+            raise TypeError('input filename type is error')
+
     def iter_train(self):
         batch = []
-        for item in read_jsonline_lazy(self.filename):
+        for item in self.load_data():
             item = self.loader.collate_fn(item)
             tokens = item[TOKENS]
             token_with_oov = item[TOKENS_OOV]
@@ -99,9 +111,9 @@ class CopyRnnDataIterator(object):
             yield self.padding_batch_train(batch)
 
     def iter_inference(self):
-        chunk_gen = get_chunk(read_jsonline_lazy(self.filename), self.batch_size)
+        chunk_gen = get_chunk(self.load_data(), self.batch_size)
         for item_chunk in chunk_gen:
-            item_chunk = [self.loader.collate_fn(item) for item in item_chunk]
+            item_chunk = [self.loader.collate_fn(item, is_inference=True) for item in item_chunk]
             yield self.padding_batch_inference(item_chunk)
 
     def padding_batch_train(self, batch):
@@ -132,14 +144,15 @@ class CopyRnnDataIterator(object):
             if key in padding_key:
                 if key in name2max_len:
                     pad_data, pad_data_len = self.__padding(data, name2max_len[key])
-                    if key == 'tokens':
+                    if key == TOKENS:
                         src_tensor = torch.tensor(pad_data_len, dtype=torch.int64)
-                        result['tokens_len'] = src_tensor
+                        result[TOKENS_LENS] = src_tensor
                 else:
                     pad_data = torch.tensor(data, dtype=torch.int64)
                 result[key] = pad_data
             else:
                 result[key] = data
+        result[RAW_BATCH] = [i[RAW_BATCH] for i in batch]
         return result
 
     def __padding(self, x_raw, max_len):
