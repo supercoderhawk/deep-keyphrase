@@ -3,17 +3,26 @@ deep-keyphrase
 ==============
 
 
-Add a short description here!
+Implement some keyphrase generation algorithm
+
 
 
 Description
 ===========
+Implemented Paper
+>>>>>>>>>>>>>>>>>>>>>
 
-A longer description of your project goes here...
+CopyRNN:
+
+`Deep Keyphrase Generation`__
+
+.. __: https://arxiv.org/abs/1704.06879
 
 
-Note
-====
+CopyCNN
 
-This project has been set up using PyScaffold 2.5.11. For details and usage
-information on PyScaffold see http://pyscaffold.readthedocs.org/.
+CopyTransformer
+
+
+Usage
+============
