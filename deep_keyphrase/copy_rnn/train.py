@@ -3,66 +3,78 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pysenal import write_json
+from pysenal import write_json, get_logger
 from deep_keyphrase.utils.vocab_loader import load_vocab
 from deep_keyphrase.copy_rnn.model import CopyRNN
-from deep_keyphrase.copy_rnn.dataloader import CopyRnnDataLoader
+from deep_keyphrase.copy_rnn.dataloader import (CopyRnnDataLoader, TOKENS, TOKENS_LENS,
+                                                TOKENS_OOV, OOV_COUNT, TARGET)
 from deep_keyphrase.utils.constants import PAD_WORD, BOS_WORD
 
 
-def train(args):
-    vocab2id = load_vocab(args.vocab_path, args.vocab_size)
+class Trainer(object):
+    def __init__(self, args):
+        self.args = args
+        self.vocab2id = load_vocab(args.vocab_path, args.vocab_size)
 
-    model = CopyRNN(args, vocab2id)
-    if torch.cuda.is_available():
-        model = model.cuda()
-    loss_func = nn.NLLLoss(ignore_index=vocab2id[PAD_WORD])
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+        self.model = CopyRNN(args, self.vocab2id)
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+        self.loss_func = nn.NLLLoss(ignore_index=self.vocab2id[PAD_WORD])
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.logger = get_logger('train')
+        self.train_loader = CopyRnnDataLoader(args.src_filename,
+                                              self.vocab2id,
+                                              args.batch_size,
+                                              args.max_src_len,
+                                              args.max_oov_count,
+                                              args.max_target_len,
+                                              'train')
 
-    train_loader = CopyRnnDataLoader(args.src_filename,
-                                     vocab2id,
-                                     args.batch_size,
-                                     args.max_src_len,
-                                     args.max_oov_count,
-                                     args.max_target_len,
-                                     'train')
-    for epoch in range(1, args.epochs + 1):
-        for batch_idx, batch in enumerate(train_loader):
-            loss = 0
-            src_tokens = batch['tokens']
-            src_tokens_with_oov = batch['tokens_with_oov']
-            oov_counts = batch['oov_count']
-            src_lens = batch['tokens_len']
-            targets = batch['target']
-            batch_size = len(src_tokens)
-            encoder_output = None
-            decoder_state = torch.zeros(batch_size, args.target_hidden_size)
-            hidden_state = None
-            for target_index in range(args.max_target_len):
-                prev_output_tokens = targets[:, target_index].unsqueeze(1)
-                true_indices = targets[:, target_index + 1]
-                decoder_prob, encoder_output, decoder_state, hidden_state = model(src_tokens,
-                                                                                  src_lens,
-                                                                                  prev_output_tokens,
-                                                                                  encoder_output,
-                                                                                  src_tokens_with_oov,
-                                                                                  oov_counts,
-                                                                                  decoder_state,
-                                                                                  hidden_state)
-                loss += loss_func(decoder_prob, true_indices)
-            print(batch_idx, loss.data.numpy())
-            loss.backward()
+    def train(self):
+        for epoch in range(1, self.args.epochs + 1):
+            for batch_idx, batch in enumerate(self.train_loader):
+                loss = self.train_batch(batch)
+                if batch_idx and batch_idx % 10 == 0:
+                    print(batch_idx, loss.data.cpu().numpy())
+                if batch_idx and batch_idx % 1000 == 0:
+                    self.save_model()
 
-            # clip norm, this is very import for avoiding nan gradient and misconvergence
-            if args.max_grad_norm:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+    def train_batch(self, batch):
+        loss = 0
+        self.optimizer.zero_grad()
+        targets = batch[TARGET]
+        if torch.cuda.is_available():
+            targets = targets.cuda()
+        batch_size = len(batch[TOKENS])
+        encoder_output = None
+        decoder_state = torch.zeros(batch_size, self.args.target_hidden_size)
+        hidden_state = None
+        for target_index in range(self.args.max_target_len):
+            prev_output_tokens = targets[:, target_index].unsqueeze(1)
+            true_indices = targets[:, target_index + 1]
+            output = self.model(src_dict=batch,
+                                prev_output_tokens=prev_output_tokens,
+                                encoder_output_dict=encoder_output,
+                                prev_decoder_state=decoder_state,
+                                prev_hidden_state=hidden_state)
+            decoder_prob, encoder_output, decoder_state, hidden_state = output
+            loss += self.loss_func(decoder_prob, true_indices)
+        loss /= batch_size
 
-            optimizer.step()
-            if batch_idx and batch_idx % 1000 == 0:
-                model_basename = args.dest_dir + 'copy_rnn_batch_{}'.format(batch_idx)
-                torch.save(model.state_dict(), model_basename + '.model')
-                write_json(model_basename + '.json', vars(args))
-                print('saved checkpoint')
+        loss.backward()
+
+        # clip norm, this is very import for avoiding nan gradient and misconvergence
+        if self.args.max_grad_norm:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+
+        self.optimizer.step()
+        return loss
+
+    def save_model(self):
+        model_basename = self.args.dest_dir + 'copy_rnn_batch_{}'.format(batch_idx)
+        torch.save(self.model.state_dict(), model_basename + '.model')
+        write_json(model_basename + '.json', vars(self.args))
+        print('saved checkpoint')
 
 
 def accuracy(probs, true_indices, pad_idx):
@@ -78,7 +90,7 @@ def main():
     parser.add_argument("-dest_dir", type=str, help='')
     parser.add_argument("-vocab_path", type=str, help='')
     parser.add_argument("-vocab_size", type=int, default=500000, help='')
-    parser.add_argument("-embed_size", type=int, default=500, help='')
+    parser.add_argument("-embed_size", type=int, default=150, help='')
     parser.add_argument("-max_oov_count", type=int, default=100, help='')
     parser.add_argument("-max_src_len", type=int, default=1500, help='')
     parser.add_argument("-max_target_len", type=int, default=8, help='')
@@ -87,11 +99,12 @@ def main():
     parser.add_argument('-src_num_layers', type=int, default=1, help='')
     parser.add_argument('-target_num_layers', type=int, default=1, help='')
     parser.add_argument("-epochs", type=int, default=10, help='')
-    parser.add_argument("-batch_size", type=int, default=64, help='')
+    parser.add_argument("-batch_size", type=int, default=128, help='')
     parser.add_argument("-dropout", type=float, default=0.5, help='')
-    parser.add_argument("-max_grad_norm", type=float, default=2, help='')
+    parser.add_argument("-max_grad_norm", type=float, default=5, help='')
+    parser.add_argument("-bidirectional", type=float, default=5, help='')
     args = parser.parse_args()
-    train(args)
+    Trainer(args).train()
 
 
 if __name__ == '__main__':
