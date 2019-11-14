@@ -12,9 +12,9 @@ Description
 Implemented Paper
 >>>>>>>>>>>>>>>>>>>>>
 
-CopyRNN:
+CopyRNN
 
-`Deep Keyphrase Generation`__
+`Deep Keyphrase Generation (Meng et al., 2017)`__
 
 .. __: https://arxiv.org/abs/1704.06879
 

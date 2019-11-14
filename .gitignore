@@ -40,3 +40,5 @@ docs/api/*
 docs/_build/*
 cover/*
 MANIFEST
+/data
+/runners
