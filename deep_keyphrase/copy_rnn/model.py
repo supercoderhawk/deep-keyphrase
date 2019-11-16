@@ -60,6 +60,8 @@ class CopyRNN(nn.Module):
         super().__init__()
         src_hidden_size = args.src_hidden_size
         target_hidden_size = args.target_hidden_size
+        if args.bidirectional:
+            target_hidden_size *= 2
         max_oov_count = args.max_oov_count
         max_len = args.max_src_len
         embed_size = args.embed_size
@@ -69,10 +71,14 @@ class CopyRNN(nn.Module):
                                       hidden_size=src_hidden_size,
                                       bidirectional=args.bidirectional,
                                       dropout=args.dropout)
+        if args.bidirectional:
+            decoder_src_hidden_size = 2 * src_hidden_size
+        else:
+            decoder_src_hidden_size = src_hidden_size
         self.decoder = CopyRnnDecoder(vocab2id=vocab2id,
                                       embedding=embedding,
                                       target_hidden_size=target_hidden_size,
-                                      src_hidden_size=src_hidden_size,
+                                      src_hidden_size=decoder_src_hidden_size,
                                       max_len=max_len,
                                       dropout=args.dropout,
                                       max_oov_count=max_oov_count)
@@ -145,7 +151,9 @@ class CopyRnnEncoder(nn.Module):
                                                              src_lengths,
                                                              batch_first=True,
                                                              enforce_sorted=False)
-        state_size = (self.num_layers, batch_size, self.hidden_size)
+        state_size = [self.num_layers, batch_size, self.hidden_size]
+        if self.bidirectional:
+            state_size[0] *= 2
         h0 = src_embed.new_zeros(state_size)
         c0 = src_embed.new_zeros(state_size)
         hidden_states, (final_hiddens, final_cells) = self.lstm(packed_src_embed, (h0, c0))
@@ -154,6 +162,9 @@ class CopyRnnEncoder(nn.Module):
                                                             batch_first=True,
                                                             total_length=total_length)
         encoder_padding_mask = src_tokens.eq(self.pad_idx)
+        if self.bidirectional:
+            final_hiddens = torch.cat((final_hiddens[0], final_hiddens[1]), dim=1).unsqueeze(0)
+            final_cells = torch.cat((final_cells[0], final_cells[1]), dim=1).unsqueeze(0)
         output = {'encoder_output': hidden_states,
                   'encoder_padding_mask': encoder_padding_mask,
                   'encoder_hidden': [final_hiddens, final_cells]}
