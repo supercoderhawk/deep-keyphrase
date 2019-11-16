@@ -14,7 +14,7 @@ TARGET = 'target'
 RAW_BATCH = 'raw'
 
 
-class CopyRnnDataLoader(object):
+class KeyphraseDataLoader(object):
     def __init__(self, data_source, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len, mode):
         self.data_source = data_source
         self.vocab2id = vocab2id
@@ -26,7 +26,7 @@ class CopyRnnDataLoader(object):
         self.mode = mode
 
     def __iter__(self):
-        return iter(CopyRnnDataIterator(self))
+        return iter(KeyphraseDataIterator(self))
 
     def collate_fn(self, item, is_inference=False):
         tokens = item['tokens']
@@ -68,7 +68,7 @@ class CopyRnnDataLoader(object):
         return final_item
 
 
-class CopyRnnDataIterator(object):
+class KeyphraseDataIterator(object):
     def __init__(self, loader):
         self.loader = loader
         self.data_source = loader.data_source
