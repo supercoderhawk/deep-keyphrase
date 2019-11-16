@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 import argparse
 import time
+import traceback
 import os
 import torch
 import torch.nn as nn
@@ -9,11 +10,10 @@ from torch.utils.tensorboard import SummaryWriter
 from pysenal import write_json, get_logger
 from deep_keyphrase.utils.vocab_loader import load_vocab
 from deep_keyphrase.copy_rnn.model import CopyRNN
-from deep_keyphrase.copy_rnn.dataloader import (CopyRnnDataLoader, TOKENS, TOKENS_LENS,
-                                                TOKENS_OOV, OOV_COUNT, TARGET)
+from deep_keyphrase.dataloader import (KeyphraseDataLoader, TOKENS, TARGET)
+from deep_keyphrase.evaluation import KeyphraseEvaluator
 from deep_keyphrase.copy_rnn.predict import CopyRnnPredictor
-from deep_keyphrase.utils.constants import PAD_WORD, BOS_WORD
-from deep_keyphrase.utils.evaluation import KeyphraseEvaluator
+from deep_keyphrase.utils.constants import PAD_WORD
 
 
 class Trainer(object):
@@ -24,15 +24,17 @@ class Trainer(object):
         self.model = CopyRNN(args, self.vocab2id)
         if torch.cuda.is_available():
             self.model = self.model.cuda()
+        if args.train_parallel:
+            self.model = nn.DataParallel(self.model)
         self.loss_func = nn.NLLLoss(ignore_index=self.vocab2id[PAD_WORD])
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
         self.logger = get_logger('train')
-        self.train_loader = CopyRnnDataLoader(args.train_filename,
-                                              self.vocab2id,
-                                              args.batch_size,
-                                              args.max_src_len,
-                                              args.max_oov_count,
-                                              args.max_target_len,
+        self.train_loader = KeyphraseDataLoader(args.train_filename,
+                                                self.vocab2id,
+                                                args.batch_size,
+                                                args.max_src_len,
+                                                args.max_oov_count,
+                                                args.max_target_len,
                                               'train')
         timemark = time.strftime('%Y%m%d-%H%M%S', time.localtime(time.time()))
         self.dest_dir = os.path.join(args.dest_base_dir, args.exp_name + '-' + timemark) + '/'
@@ -42,11 +44,6 @@ class Trainer(object):
         else:
             tensorboard_dir = args.tensorboard_dir
         self.writer = SummaryWriter(tensorboard_dir)
-        self.predictor = CopyRnnPredictor(model_info={'model': self.model, 'config': args},
-                                          vocab_info=self.vocab2id,
-                                          beam_size=args.beam_size,
-                                          max_target_len=args.max_target_len,
-                                          max_src_length=args.max_src_len)
         self.eval_topn = (5, 10)
         self.macro_evaluator = KeyphraseEvaluator(self.eval_topn, 'macro')
         self.micro_evaluator = KeyphraseEvaluator(self.eval_topn, 'micro')
@@ -63,7 +60,8 @@ class Trainer(object):
                 try:
                     loss = self.train_batch(batch)
                 except Exception as e:
-                    print(e)
+                    err_stack = traceback.format_exc()
+                    self.logger.error(err_stack)
                     loss = 0.0
                 step += 1
                 self.writer.add_scalar('loss', loss, step)
@@ -83,17 +81,27 @@ class Trainer(object):
             targets = targets.cuda()
         batch_size = len(batch[TOKENS])
         encoder_output = None
-        decoder_state = torch.zeros(batch_size, self.args.target_hidden_size)
+        if self.args.bidirectional:
+            decoder_state = torch.zeros(batch_size, self.args.target_hidden_size * 2)
+        else:
+            decoder_state = torch.zeros(batch_size, self.args.target_hidden_size)
         hidden_state = None
         for target_index in range(self.args.max_target_len):
-            prev_output_tokens = targets[:, target_index].unsqueeze(1)
-            true_indices = targets[:, target_index + 1]
+            if target_index == 0:
+                # bos indices
+                prev_output_tokens = targets[:, target_index].unsqueeze(1)
+            else:
+                if self.args.teacher_forcing:
+                    prev_output_tokens = targets[:, target_index].unsqueeze(1)
+                else:
+                    prev_output_tokens = torch.topk(decoder_prob, 1, 1)
             output = self.model(src_dict=batch,
                                 prev_output_tokens=prev_output_tokens,
                                 encoder_output_dict=encoder_output,
                                 prev_decoder_state=decoder_state,
                                 prev_hidden_state=hidden_state)
             decoder_prob, encoder_output, decoder_state, hidden_state = output
+            true_indices = targets[:, target_index + 1]
             loss += self.loss_func(decoder_prob, true_indices)
 
         loss.backward()
@@ -123,11 +131,16 @@ class Trainer(object):
         self.logger.info('epoch {} step {}, model saved'.format(epoch, step))
 
     def evaluate(self, step):
+        predictor = CopyRnnPredictor(model_info={'model': self.model, 'config': self.args},
+                                     vocab_info=self.vocab2id,
+                                     beam_size=self.args.beam_size,
+                                     max_target_len=self.args.max_target_len,
+                                     max_src_length=self.args.max_src_len)
         pred_valid_filename = self.dest_dir + self.get_basename(self.args.valid_filename)
         pred_valid_filename += '.batch_{}.pred.jsonl'.format(step)
         eval_filename = self.dest_dir + self.args.exp_name + '.batch_{}.eval.json'.format(step)
-        self.predictor.eval_predict(self.args.valid_filename, pred_valid_filename,
-                                    self.args.eval_batch_size, self.model, True)
+        predictor.eval_predict(self.args.valid_filename, pred_valid_filename,
+                               self.args.eval_batch_size, self.model, True)
         valid_macro_ret = self.macro_evaluator.evaluate(pred_valid_filename)
         # valid_micro_ret = self.micro_evaluator.evaluate(pred_valid_filename)
         for n, counter in valid_macro_ret.items():
@@ -137,8 +150,8 @@ class Trainer(object):
         pred_test_filename = self.dest_dir + self.get_basename(self.args.test_filename)
         pred_test_filename += '.batch_{}.pred.jsonl'.format(step)
 
-        self.predictor.eval_predict(self.args.test_filename, pred_test_filename,
-                                    self.args.batch_size, self.model, True)
+        predictor.eval_predict(self.args.test_filename, pred_test_filename,
+                               self.args.batch_size, self.model, True)
         test_macro_ret = self.macro_evaluator.evaluate(pred_test_filename)
         for n, counter in test_macro_ret.items():
             for k, v in counter.items():
@@ -180,16 +193,18 @@ def main():
     parser.add_argument("-batch_size", type=int, default=50, help='')
     parser.add_argument("-eval_batch_size", type=int, default=10, help='')
     parser.add_argument("-dropout", type=float, default=0.5, help='')
-    parser.add_argument("-grad_norm", type=float, default=2.0, help='')
+    parser.add_argument("-grad_norm", type=float, default=0.0, help='')
     parser.add_argument("-max_grad", type=float, default=10.0, help='')
-    parser.add_argument("-bidirectional", action='store_true', help='')
-    parser.add_argument("-use_vanilla_rnn_search", action='store_false', help='')
+    parser.add_argument("-shuffle_in_batch", action='store_true', help='')
+    parser.add_argument("-bidirectional", default=True, action='store_true', help='')
+    parser.add_argument("-use_vanilla_rnn_search", default=False, action='store_true', help='')
     parser.add_argument("-teacher_forcing", action='store_true', help='')
     parser.add_argument("-beam_size", type=float, default=50, help='')
     parser.add_argument('-tensorboard_dir', type=str, default='', help='')
     parser.add_argument('-logfile', type=str, default='train_log.log', help='')
     parser.add_argument('-save_model_step', type=int, default=5000, help='')
-    parser.add_argument('-early_stop_tolerance', type=int, default=30, help='')
+    parser.add_argument('-early_stop_tolerance', type=int, default=50, help='')
+    parser.add_argument('-train_parallel', action='store_true', help='')
     args = parser.parse_args()
     Trainer(args).train()
 
