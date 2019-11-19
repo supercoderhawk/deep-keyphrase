@@ -6,15 +6,20 @@ from pysenal import read_file, append_jsonlines
 from collections import namedtuple, OrderedDict
 from deep_keyphrase.copy_rnn.model import CopyRNN
 from deep_keyphrase.copy_rnn.beam_search import BeamSearch
-from deep_keyphrase.copy_rnn.dataloader import CopyRnnDataLoader, RAW_BATCH, TOKENS
+from deep_keyphrase.dataloader import KeyphraseDataLoader, RAW_BATCH, TOKENS
 from deep_keyphrase.utils.vocab_loader import load_vocab
 from deep_keyphrase.utils.constants import BOS_WORD
 from deep_keyphrase.utils.tokenizer import token_char_tokenize
 
 
 class CopyRnnPredictor(object):
-    def __init__(self, model_info, vocab_path, beam_size, max_target_len, max_src_length):
-        self.vocab2id = load_vocab(vocab_path)
+    def __init__(self, model_info, vocab_info, beam_size, max_target_len, max_src_length):
+        if isinstance(vocab_info, str):
+            self.vocab2id = load_vocab(vocab_info)
+        elif isinstance(vocab_info, dict):
+            self.vocab2id = vocab_info
+        else:
+            raise ValueError('vocab info type error')
         self.id2vocab = dict(zip(self.vocab2id.values(), self.vocab2id.keys()))
         self.config = self.load_config(model_info)
         self.model = self.load_model(model_info, self.vocab2id)
@@ -26,7 +31,8 @@ class CopyRnnPredictor(object):
                                         beam_size=self.beam_size,
                                         max_target_len=self.max_target_len,
                                         id2vocab=self.id2vocab,
-                                        bos_idx=self.vocab2id[BOS_WORD])
+                                        bos_idx=self.vocab2id[BOS_WORD],
+                                        args=self.config)
 
     def load_config(self, model_info):
         if 'config' not in model_info:
@@ -78,13 +84,13 @@ class CopyRnnPredictor(object):
         if len(text_list) < batch_size:
             batch_size = len(text_list)
         text_list = [{TOKENS: token_char_tokenize(i)} for i in text_list]
-        loader = CopyRnnDataLoader(data_source=text_list,
-                                   vocab2id=self.vocab2id,
-                                   batch_size=batch_size,
-                                   max_oov_count=self.config.max_oov_count,
-                                   max_src_len=self.max_src_len,
-                                   max_target_len=self.max_target_len,
-                                   mode='valid')
+        loader = KeyphraseDataLoader(data_source=text_list,
+                                     vocab2id=self.vocab2id,
+                                     batch_size=batch_size,
+                                     max_oov_count=self.config.max_oov_count,
+                                     max_src_len=self.max_src_len,
+                                     max_target_len=self.max_target_len,
+                                     mode='valid')
         result = []
         for batch in loader:
             with torch.no_grad():
@@ -92,13 +98,13 @@ class CopyRnnPredictor(object):
         return result
 
     def eval_predict(self, src_filename, dest_filename, batch_size, model=None, remove_existed=False):
-        loader = CopyRnnDataLoader(data_source=src_filename,
-                                   vocab2id=self.vocab2id,
-                                   batch_size=batch_size,
-                                   max_oov_count=self.config.max_oov_count,
-                                   max_src_len=self.max_src_len,
-                                   max_target_len=self.max_target_len,
-                                   mode='valid')
+        loader = KeyphraseDataLoader(data_source=src_filename,
+                                     vocab2id=self.vocab2id,
+                                     batch_size=batch_size,
+                                     max_oov_count=self.config.max_oov_count,
+                                     max_src_len=self.max_src_len,
+                                     max_target_len=self.max_target_len,
+                                     mode='valid')
 
         if os.path.exists(dest_filename):
             print('destination filename {} existed'.format(dest_filename))
@@ -110,7 +116,8 @@ class CopyRnnPredictor(object):
                                             beam_size=self.beam_size,
                                             max_target_len=self.max_target_len,
                                             id2vocab=self.id2vocab,
-                                            bos_idx=self.vocab2id[BOS_WORD])
+                                            bos_idx=self.vocab2id[BOS_WORD],
+                                            args=self.config)
 
         for batch in loader:
             with torch.no_grad():
