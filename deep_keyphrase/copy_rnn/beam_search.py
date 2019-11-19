@@ -1,16 +1,17 @@
 # -*- coding: UTF-8 -*-
 import torch
-from deep_keyphrase.copy_rnn.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
-                                                OOV_COUNT, OOV_LIST, EOS_WORD)
+from deep_keyphrase.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
+                                       OOV_COUNT, OOV_LIST, EOS_WORD)
 
 
 class BeamSearch(object):
-    def __init__(self, model, beam_size, max_target_len, id2vocab, bos_idx):
+    def __init__(self, model, beam_size, max_target_len, id2vocab, bos_idx, args):
         self.model = model
         self.beam_size = beam_size
         self.id2vocab = id2vocab
         self.max_target_len = max_target_len
         self.bos_idx = bos_idx
+        self.target_hidden_size = args.target_hidden_size
 
     def beam_search(self, src_dict, delimiter=None):
         """
@@ -26,8 +27,7 @@ class BeamSearch(object):
         hidden_state = None
         beam_batch_size = self.beam_size * batch_size
         prev_output_tokens = torch.tensor([[self.bos_idx]] * batch_size, dtype=torch.int64)
-        target_hidden_size = self.model.decoder.target_hidden_size
-        decoder_state = torch.zeros(batch_size, target_hidden_size)
+        decoder_state = torch.zeros(batch_size, self.target_hidden_size)
 
         if torch.cuda.is_available():
             prev_output_tokens = prev_output_tokens.cuda()
