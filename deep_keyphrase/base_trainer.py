@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 import time
 import traceback
+import logging
 import os
 import gc
 import torch
@@ -16,6 +17,7 @@ from deep_keyphrase.utils.constants import PAD_WORD
 
 class BaseTrainer(object):
     def __init__(self, args, model):
+        torch.manual_seed(0)
         self.args = args
         self.vocab2id = load_vocab(self.args.vocab_path, self.args.vocab_size)
 
@@ -34,9 +36,18 @@ class BaseTrainer(object):
                                                 self.args.max_oov_count,
                                                 self.args.max_target_len,
                                                 'train')
-        timemark = time.strftime('%Y%m%d-%H%M%S', time.localtime(time.time()))
-        self.dest_dir = os.path.join(self.args.dest_base_dir, self.args.exp_name + '-' + timemark) + '/'
-        os.mkdir(self.dest_dir)
+        if self.args.train_from:
+            self.dest_dir = os.path.dirname(self.args.train_from) + '/'
+        else:
+            timemark = time.strftime('%Y%m%d-%H%M%S', time.localtime(time.time()))
+            self.dest_dir = os.path.join(self.args.dest_base_dir, self.args.exp_name + '-' + timemark) + '/'
+            os.mkdir(self.dest_dir)
+
+        fh = logging.FileHandler(os.path.join(self.dest_dir, args.logfile))
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
+        self.logger.addHandler(fh)
+
         if not self.args.tensorboard_dir:
             tensorboard_dir = self.dest_dir + 'logs/'
         else:
@@ -46,7 +57,7 @@ class BaseTrainer(object):
         self.macro_evaluator = KeyphraseEvaluator(self.eval_topn, 'macro')
         self.micro_evaluator = KeyphraseEvaluator(self.eval_topn, 'micro')
         self.best_f1 = None
-        self.best_step = None
+        self.best_step = 0
         self.not_update_count = 0
 
     def parse_args(self):
@@ -55,7 +66,12 @@ class BaseTrainer(object):
     def train(self):
         step = 0
         is_stop = False
-        self.logger.info('destination dir:{}'.format(self.dest_dir))
+        if self.args.train_from:
+            step = self.args.step
+            self.logger.info('train from destination dir:{}'.format(self.dest_dir))
+            self.logger.info('train from step {}'.format(step))
+        else:
+            self.logger.info('destination dir:{}'.format(self.dest_dir))
         for epoch in range(1, self.args.epochs + 1):
             for batch_idx, batch in enumerate(self.train_loader):
                 self.model.train()
@@ -97,6 +113,8 @@ class BaseTrainer(object):
         model_basename = self.dest_dir + '{}_epoch_{}_batch_{}'.format(exp_name, epoch, step)
         torch.save(self.model.state_dict(), model_basename + '.model')
         write_json(model_basename + '.json', vars(self.args))
+        score_msg_tmpl = 'best score: step {} macro f1@{} {:.4f}'
+        self.logger.info(score_msg_tmpl.format(self.best_step, self.eval_topn[-1], self.best_f1))
         self.logger.info('epoch {} step {}, model saved'.format(epoch, step))
 
     def evaluate(self, step):
