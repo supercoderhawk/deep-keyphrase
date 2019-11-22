@@ -81,6 +81,7 @@ class CopyRnnPredictor(object):
         :param batch_size:
         :return:
         """
+        self.model.eval()
         if len(text_list) < batch_size:
             batch_size = len(text_list)
         text_list = [{TOKENS: token_char_tokenize(i)} for i in text_list]
