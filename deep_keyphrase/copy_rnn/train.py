@@ -1,7 +1,10 @@
 # -*- coding: UTF-8 -*-
+import os
 import argparse
+from collections import OrderedDict
+from munch import Munch
 import torch
-from pysenal import write_json
+from pysenal import write_json, read_json
 from deep_keyphrase.utils.vocab_loader import load_vocab
 from deep_keyphrase.copy_rnn.model import CopyRNN
 from deep_keyphrase.base_trainer import BaseTrainer
@@ -11,9 +14,40 @@ from deep_keyphrase.copy_rnn.predict import CopyRnnPredictor
 
 class CopyRnnTrainer(BaseTrainer):
     def __init__(self):
-        args = self.parse_args()
-        model = CopyRNN(args, load_vocab(args.vocab_path))
-        super().__init__(args, model)
+        self.args = self.parse_args()
+        self.vocab2id = load_vocab(self.args.vocab_path, self.args.vocab_size)
+        model = self.load_model()
+        super().__init__(self.args, model)
+
+    def load_model(self):
+        if not self.args.train_from:
+            model = CopyRNN(self.args, self.vocab2id)
+        else:
+            model_path = self.args.train_from
+            config_path = os.path.join(os.path.dirname(model_path),
+                                       self.get_basename(model_path) + '.json')
+
+            old_config = read_json(config_path)
+            old_config['train_from'] = model_path
+            old_config['step'] = int(model_path.rsplit('_', 1)[-1].split('.')[0])
+            self.args = Munch(old_config)
+            self.vocab2id = load_vocab(self.args.vocab_path, self.args.vocab_size)
+
+            model = CopyRNN(self.args, self.vocab2id)
+
+            if torch.cuda.is_available():
+                checkpoint = torch.load(model_path)
+            else:
+                checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+            state_dict = OrderedDict()
+            # avoid error when load parallel trained model
+            for k, v in checkpoint.items():
+                if k.startswith('module.'):
+                    k = k[7:]
+                state_dict[k] = v
+            model.load_state_dict(state_dict)
+
+        return model
 
     def train_batch(self, batch):
         loss = 0
@@ -84,7 +118,7 @@ class CopyRnnTrainer(BaseTrainer):
                 self.writer.add_scalar(name, v, step)
         write_json(eval_filename, {'valid_macro': valid_macro_ret, 'test_macro': test_macro_ret})
         # valid_micro_ret = self.micro_evaluator.evaluate(pred_test_filename)
-        return valid_macro_ret[self.eval_topn[-1]]['recall']
+        return valid_macro_ret[self.eval_topn[-1]]['f1']
 
     def parse_args(self):
         parser = argparse.ArgumentParser()
@@ -96,11 +130,12 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument("-dest_base_dir", required=True, type=str, help='')
         parser.add_argument("-vocab_path", required=True, type=str, help='')
         parser.add_argument("-vocab_size", type=int, default=500000, help='')
+        parser.add_argument("-train_from", default='', type=str, help='')
         parser.add_argument("-epochs", type=int, default=10, help='')
         parser.add_argument("-batch_size", type=int, default=64, help='')
         parser.add_argument("-learning_rate", type=float, default=1e-4, help='')
         parser.add_argument("-eval_batch_size", type=int, default=20, help='')
-        parser.add_argument("-dropout", type=float, default=0.0, help='')
+        parser.add_argument("-dropout", type=float, default=0.1, help='')
         parser.add_argument("-grad_norm", type=float, default=0.0, help='')
         parser.add_argument("-max_grad", type=float, default=5.0, help='')
         parser.add_argument("-shuffle_in_batch", action='store_true', help='')
@@ -123,6 +158,7 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument('-target_num_layers', type=int, default=1, help='')
         parser.add_argument("-bidirectional", action='store_true', help='')
         parser.add_argument("-copy_net", action='store_true', help='')
+        parser.add_argument("-input_feeding", action='store_true', help='')
 
         args = parser.parse_args()
         return args
