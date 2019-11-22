@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
-import torch.nn as nn
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from deep_keyphrase.utils.constants import *
 from deep_keyphrase.dataloader import TOKENS, TOKENS_OOV, TOKENS_LENS, OOV_COUNT
 
@@ -60,10 +61,6 @@ class CopyRNN(nn.Module):
         super().__init__()
         src_hidden_size = args.src_hidden_size
         target_hidden_size = args.target_hidden_size
-        if args.bidirectional:
-            target_hidden_size *= 2
-        max_oov_count = args.max_oov_count
-        max_len = args.max_src_len
         embed_size = args.embed_size
         embedding = nn.Embedding(len(vocab2id), embed_size, vocab2id[PAD_WORD])
         self.encoder = CopyRnnEncoder(vocab2id=vocab2id,
@@ -75,13 +72,10 @@ class CopyRNN(nn.Module):
             decoder_src_hidden_size = 2 * src_hidden_size
         else:
             decoder_src_hidden_size = src_hidden_size
-        self.decoder = CopyRnnDecoder(vocab2id=vocab2id,
-                                      embedding=embedding,
-                                      target_hidden_size=target_hidden_size,
-                                      src_hidden_size=decoder_src_hidden_size,
-                                      max_len=max_len,
-                                      dropout=args.dropout,
-                                      max_oov_count=max_oov_count)
+        self.decoder = CopyRnnDecoder(vocab2id=vocab2id, embedding=embedding, args=args)
+        if decoder_src_hidden_size != target_hidden_size:
+            self.encoder2decoder_state = nn.Linear(decoder_src_hidden_size, target_hidden_size)
+            self.encoder2decoder_cell = nn.Linear(decoder_src_hidden_size, target_hidden_size)
 
     def forward(self, src_dict, prev_output_tokens, encoder_output_dict,
                 prev_decoder_state, prev_hidden_state):
@@ -104,6 +98,8 @@ class CopyRNN(nn.Module):
         if encoder_output_dict is None:
             encoder_output_dict = self.encoder(src_dict)
             prev_hidden_state = encoder_output_dict['encoder_hidden']
+            prev_hidden_state[0] = self.encoder2decoder_state(prev_hidden_state[0])
+            prev_hidden_state[1] = self.encoder2decoder_cell(prev_hidden_state[1])
 
         decoder_prob, prev_decoder_state, prev_hidden_state = self.decoder(
             src_dict=src_dict,
@@ -123,17 +119,15 @@ class CopyRnnEncoder(nn.Module):
         self.embedding = embedding
         self.hidden_size = hidden_size
         self.bidirectional = bidirectional
-        self.dropout = dropout
         self.num_layers = 1
         self.pad_idx = vocab2id[PAD_WORD]
-
+        self.dropout = dropout
         self.lstm = nn.LSTM(
             input_size=embed_dim,
             hidden_size=hidden_size,
-            num_layers=1,
+            num_layers=self.num_layers,
             bidirectional=bidirectional,
-            batch_first=True,
-            dropout=self.dropout
+            batch_first=True
         )
 
     def forward(self, src_dict):
@@ -146,6 +140,8 @@ class CopyRnnEncoder(nn.Module):
         src_lengths = src_dict[TOKENS_LENS]
         batch_size = len(src_tokens)
         src_embed = self.embedding(src_tokens)
+        src_embed = F.dropout(src_embed, p=self.dropout, training=self.training)
+
         total_length = src_embed.size(1)
         packed_src_embed = nn.utils.rnn.pack_padded_sequence(src_embed,
                                                              src_lengths,
@@ -172,8 +168,7 @@ class CopyRnnEncoder(nn.Module):
 
 
 class CopyRnnDecoder(nn.Module):
-    def __init__(self, vocab2id, embedding, target_hidden_size, src_hidden_size, max_len,
-                 dropout, max_oov_count, is_copy=True, is_attention=True):
+    def __init__(self, vocab2id, embedding, args):
         super().__init__()
         self.vocab2id = vocab2id
         vocab_size = embedding.num_embeddings
@@ -181,28 +176,36 @@ class CopyRnnDecoder(nn.Module):
         self.vocab_size = vocab_size
         self.embed_size = embed_dim
         self.embedding = embedding
-        self.target_hidden_size = target_hidden_size
-        self.src_hidden_size = src_hidden_size
-        self.max_len = max_len
-        self.max_oov_count = max_oov_count
-        self.dropout = dropout
-        self.pad_idx = vocab2id[PAD_WORD]
-        self.is_copy = is_copy
-        if is_copy:
-            decoder_hidden_size = embed_dim + src_hidden_size
+        self.target_hidden_size = args.target_hidden_size
+        if args.bidirectional:
+            self.src_hidden_size = args.src_hidden_size * 2
         else:
-            decoder_hidden_size = embed_dim
+            self.src_hidden_size = args.src_hidden_size
+        self.max_src_len = args.max_src_len
+        self.max_oov_count = args.max_oov_count
+        self.dropout = args.dropout
+        self.pad_idx = vocab2id[PAD_WORD]
+        self.is_copy = args.copy_net
+        self.input_feeding = args.input_feeding
+
+        if self.is_copy:
+            decoder_input_size = embed_dim + self.src_hidden_size
+        else:
+            decoder_input_size = embed_dim
+
+        if args.input_feeding:
+            decoder_input_size += self.target_hidden_size
+
         self.lstm = nn.LSTM(
-            input_size=decoder_hidden_size,
-            hidden_size=target_hidden_size,
+            input_size=decoder_input_size,
+            hidden_size=self.target_hidden_size,
             num_layers=1,
-            batch_first=True,
-            dropout=self.dropout
+            batch_first=True
         )
-        self.attn_layer = Attention(src_hidden_size, target_hidden_size)
-        self.copy_proj = nn.Linear(src_hidden_size, target_hidden_size, bias=False)
-        self.input_copy_proj = nn.Linear(src_hidden_size, target_hidden_size, bias=False)
-        self.generate_proj = nn.Linear(target_hidden_size, self.vocab_size, bias=False)
+        self.attn_layer = Attention(self.src_hidden_size, self.target_hidden_size)
+        self.copy_proj = nn.Linear(self.src_hidden_size, self.target_hidden_size, bias=False)
+        self.input_copy_proj = nn.Linear(self.src_hidden_size, self.target_hidden_size, bias=False)
+        self.generate_proj = nn.Linear(self.target_hidden_size, self.vocab_size, bias=False)
 
     def forward(self, prev_output_tokens, encoder_output_dict, prev_context_state,
                 prev_rnn_state, src_dict):
@@ -224,7 +227,8 @@ class CopyRnnDecoder(nn.Module):
         else:
             output = self.forward_rnn(encoder_output_dict=encoder_output_dict,
                                       prev_output_tokens=prev_output_tokens,
-                                      prev_rnn_state=prev_rnn_state)
+                                      prev_rnn_state=prev_rnn_state,
+                                      prev_context_state=prev_context_state)
         return output
 
     def forward_copyrnn(self,
@@ -242,6 +246,7 @@ class CopyRnnDecoder(nn.Module):
 
         encoder_output = encoder_output_dict['encoder_output']
         encoder_output_mask = encoder_output_dict['encoder_padding_mask']
+        # B x 1 x L
         copy_state = self.get_attn_read_input(encoder_output,
                                               prev_context_state,
                                               prev_output_tokens,
@@ -250,7 +255,13 @@ class CopyRnnDecoder(nn.Module):
         # map copied oov tokens to OOV idx to avoid embedding lookup error
         prev_output_tokens[prev_output_tokens >= self.vocab_size] = self.vocab2id[UNK_WORD]
         src_embed = self.embedding(prev_output_tokens)
-        decoder_input = torch.cat([src_embed, copy_state], dim=2)
+        if self.input_feeding:
+            prev_context_state = prev_context_state.unsqueeze(1)
+            decoder_input = torch.cat([src_embed, prev_context_state, copy_state], dim=2)
+            # print(decoder_input.size())
+        else:
+            decoder_input = torch.cat([src_embed, copy_state], dim=2)
+        decoder_input = F.dropout(decoder_input, p=self.dropout, training=self.training)
         rnn_output, rnn_state = self.lstm(decoder_input, prev_rnn_state)
         rnn_state = list(rnn_state)
         # attn_output is the final hidden state of decoder layer
@@ -270,11 +281,16 @@ class CopyRnnDecoder(nn.Module):
         total_prob = torch.log(total_prob)
         return total_prob, attn_output.squeeze(1), rnn_state
 
-    def forward_rnn(self, encoder_output_dict, prev_output_tokens, prev_rnn_state):
+    def forward_rnn(self, encoder_output_dict, prev_output_tokens, prev_rnn_state, prev_context_state):
         encoder_output = encoder_output_dict['encoder_output']
         encoder_output_mask = encoder_output_dict['encoder_padding_mask']
         src_embed = self.embedding(prev_output_tokens)
-        rnn_output, rnn_state = self.lstm(src_embed, prev_rnn_state)
+        if self.input_feeding:
+            prev_context_state = prev_context_state.unsqueeze(1)
+            decoder_input = torch.cat([src_embed, prev_context_state], dim=2)
+        else:
+            decoder_input = src_embed
+        rnn_output, rnn_state = self.lstm(decoder_input, prev_rnn_state)
         rnn_state = list(rnn_state)
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
         probs = torch.log_softmax(self.generate_proj(attn_output).squeeze(1), 1)
@@ -291,17 +307,18 @@ class CopyRnnDecoder(nn.Module):
         :return:
         """
         # mask : B x L x 1
-        mask_bool = torch.eq(prev_output_tokens.repeat(1, self.max_len), src_tokens_with_oov).unsqueeze(2)
+        mask_bool = torch.eq(prev_output_tokens.repeat(1, self.max_src_len),
+                             src_tokens_with_oov).unsqueeze(2)
         mask = mask_bool.type_as(encoder_output)
         # B x L x SH
         aggregate_weight = torch.tanh(self.input_copy_proj(torch.mul(mask, encoder_output)))
         # when all prev_tokens are not in src_tokens, don't execute mask -inf to avoid nan result in softmax
-        no_zero_mask = ((mask != 0).sum(dim=1) != 0).repeat(1, self.max_len).unsqueeze(2)
+        no_zero_mask = ((mask != 0).sum(dim=1) != 0).repeat(1, self.max_src_len).unsqueeze(2)
         input_copy_logit_mask = no_zero_mask * mask_bool
         input_copy_logit = torch.bmm(aggregate_weight, prev_context_state.unsqueeze(2))
         input_copy_logit.masked_fill_(input_copy_logit_mask, float('-inf'))
         input_copy_weight = torch.softmax(input_copy_logit.squeeze(2), 1)
-        # B x 1 x L
+        # B x 1 x SH
         copy_state = torch.bmm(input_copy_weight.unsqueeze(1), encoder_output)
         return copy_state
 
