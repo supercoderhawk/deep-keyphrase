@@ -1,6 +1,11 @@
 # -*- coding: UTF-8 -*-
+import random
+import traceback
+import sys
+import threading
 import numpy as np
 import torch
+import torch.multiprocessing as multiprocessing
 from pysenal import read_jsonline_lazy, get_chunk
 from deep_keyphrase.utils.constants import *
 
@@ -14,8 +19,23 @@ TARGET = 'target'
 RAW_BATCH = 'raw'
 
 
+class ExceptionWrapper(object):
+    """
+    Wraps an exception plus traceback to communicate across threads
+    """
+
+    def __init__(self, exc_info):
+        self.exc_type = exc_info[0]
+        self.exc_msg = "".join(traceback.format_exception(*exc_info))
+
+
 class KeyphraseDataLoader(object):
-    def __init__(self, data_source, vocab2id, batch_size, max_src_len, max_oov_count, max_target_len, mode):
+    def __init__(self, data_source, vocab2id, batch_size, max_src_len,
+                 max_oov_count, max_target_len, mode,
+                 pre_fetch=False,
+                 shuffle_in_batch=False,
+                 token_field='tokens',
+                 keyphrase_field='keyphrases'):
         self.data_source = data_source
         self.vocab2id = vocab2id
         self.vocab_size = len(self.vocab2id)
@@ -24,16 +44,20 @@ class KeyphraseDataLoader(object):
         self.max_oov_count = max_oov_count
         self.max_target_len = max_target_len
         self.mode = mode
+        self.pre_fetch = pre_fetch
+        self.shuffle_in_batch = shuffle_in_batch
+        self.token_field = token_field
+        self.keyphrases_field = keyphrase_field
 
     def __iter__(self):
         return iter(KeyphraseDataIterator(self))
 
     def collate_fn(self, item, is_inference=False):
-        tokens = item['tokens']
+        tokens = item[self.token_field]
         token_ids_with_oov = []
         token_ids = []
         oov_list = []
-        target_ids_list = []
+
         for token in tokens:
             idx = self.vocab2id.get(token, self.vocab_size)
             if idx == self.vocab_size:
@@ -49,22 +73,21 @@ class KeyphraseDataLoader(object):
             else:
                 token_ids.append(idx)
                 token_ids_with_oov.append(idx)
-        if not is_inference:
-            for keyphrase in item['keyphrases']:
-                target_ids = [self.vocab2id[BOS_WORD]]
-                for token in keyphrase:
-                    target_ids.append(self.vocab2id.get(token, self.vocab2id[UNK_WORD]))
-                target_ids.append(self.vocab2id[EOS_WORD])
-                target_ids_list.append(target_ids)
 
         final_item = {TOKENS: token_ids,
                       TOKENS_OOV: token_ids_with_oov,
                       OOV_COUNT: len(oov_list),
                       OOV_LIST: oov_list}
+
         if is_inference:
             final_item[RAW_BATCH] = item
         else:
-            final_item[TARGET_LIST] = target_ids_list
+            keyphrase = item['phrase']
+            target_ids = [self.vocab2id[BOS_WORD]]
+            for token in keyphrase:
+                target_ids.append(self.vocab2id.get(token, self.vocab2id[UNK_WORD]))
+            target_ids.append(self.vocab2id[EOS_WORD])
+            final_item[TARGET] = target_ids
         return final_item
 
 
@@ -73,6 +96,30 @@ class KeyphraseDataIterator(object):
         self.loader = loader
         self.data_source = loader.data_source
         self.batch_size = loader.batch_size
+        self.num_workers = 8
+        if self.loader.mode == 'train':
+            self.chunk_size = self.num_workers * 50
+        else:
+            self.chunk_size = self.batch_size
+        self._data = self.load_data(self.chunk_size)
+        self._batch_count_in_output_queue = 0
+        self._redundant_batch = []
+        self.input_queue = multiprocessing.Queue(1000 * self.num_workers)
+        self.output_queue = multiprocessing.Queue(1000 * self.num_workers)
+        self.done_event = threading.Event()
+        self.worker_shutdown = False
+        self.workers = []
+        for _ in range(self.num_workers):
+            worker = multiprocessing.Process(
+                target=self._train_data_worker_loop
+            )
+            self.workers.append(worker)
+        for worker in self.workers:
+            worker.daemon = True
+            worker.start()
+
+        if self.loader.mode == 'train' or self.loader.pre_fetch:
+            self.__prefetch()
 
     def __iter__(self):
         if self.loader.mode == 'train':
@@ -80,39 +127,97 @@ class KeyphraseDataIterator(object):
         else:
             yield from self.iter_inference()
 
-    def load_data(self):
+    def load_data(self, chunk_size):
         if isinstance(self.data_source, str):
-            return read_jsonline_lazy(self.data_source)
+            data = read_jsonline_lazy(self.data_source)
         elif isinstance(self.data_source, list):
-            return iter(self.data_source)
+            data = iter(self.data_source)
         else:
             raise TypeError('input filename type is error')
+        return get_chunk(data, chunk_size)
+
+    def _train_data_worker_loop(self):
+        while True:
+            raw_batch = self.input_queue.get()
+            if raw_batch is None:
+                break
+            try:
+                batch = []
+                for item in raw_batch:
+                    batch.append(self.loader.collate_fn(item))
+                if self.loader.shuffle_in_batch:
+                    random.shuffle(batch)
+                batch = self.padding_batch_train(batch)
+                self.output_queue.put(batch)
+            except Exception as e:
+                self.output_queue.put(ExceptionWrapper(sys.exc_info()))
+
+    def __prefetch(self):
+        item_chunk = next(self._data)
+        batches, redundant_batch = self.get_batches(item_chunk, [])
+        self._redundant_batch = redundant_batch
+        for batch in batches:
+            self.input_queue.put(batch)
+            self._batch_count_in_output_queue += 1
 
     def iter_train(self):
-        batch = []
-        for item in self.load_data():
-            item = self.loader.collate_fn(item)
-            tokens = item[TOKENS]
-            token_with_oov = item[TOKENS_OOV]
-            oov_count = item[OOV_COUNT]
-            flatten_items = []
-            for phrase in item[TARGET_LIST]:
-                one2one_item = {TOKENS: tokens,
-                                TOKENS_OOV: token_with_oov,
-                                OOV_COUNT: oov_count,
-                                TARGET: phrase}
-                flatten_items.append(one2one_item)
-            if len(batch) + len(flatten_items) > self.batch_size:
-                yield self.padding_batch_train(batch)
+        redundant_batch = self._redundant_batch
+        for item_chunk in self._data:
+            batches, redundant_batch = self.get_batches(item_chunk, redundant_batch)
+            batch_idx = 0
+            for idx in range(self._batch_count_in_output_queue):
+                if batch_idx < len(batches):
+                    self.input_queue.put(batches[batch_idx])
+                    batch_idx += 1
+                yield self.output_queue.get()
+
+            if batch_idx < len(batches):
+                for batch in batches[batch_idx:]:
+                    self.input_queue.put(batch)
+
+            self._batch_count_in_output_queue = len(batches)
+        if redundant_batch:
+            self.input_queue.put(redundant_batch)
+            yield self.output_queue.get()
+
+    def get_batches(self, item_chunk, batch):
+        batches = []
+
+        for item in item_chunk:
+            if batch and len(batch) > self.batch_size:
+                for sliced_batch in get_chunk(batch, self.batch_size):
+                    batches.append(sliced_batch)
+                batch = []
+            flatten_items = self.flatten_raw_item(item)
+            if batch and len(batch) + len(flatten_items) > self.batch_size:
+                batches.append(batch)
                 batch = flatten_items
             else:
                 batch.extend(flatten_items)
-        if batch:
-            yield self.padding_batch_train(batch)
+
+        return batches, batch
+
+    def flatten_raw_item(self, item):
+        flatten_items = []
+        for phrase in item[self.loader.keyphrases_field]:
+            flatten_items.append({'tokens': item['tokens'], 'phrase': phrase})
+        return flatten_items
+
+    def flatten_item(self, item):
+        tokens = item[TOKENS]
+        token_with_oov = item[TOKENS_OOV]
+        oov_count = item[OOV_COUNT]
+        flatten_items = []
+        for phrase in item[TARGET_LIST]:
+            one2one_item = {TOKENS: tokens,
+                            TOKENS_OOV: token_with_oov,
+                            OOV_COUNT: oov_count,
+                            TARGET: phrase}
+            flatten_items.append(one2one_item)
+        return flatten_items
 
     def iter_inference(self):
-        chunk_gen = get_chunk(self.load_data(), self.batch_size)
-        for item_chunk in chunk_gen:
+        for item_chunk in self._data:
             item_chunk = [self.loader.collate_fn(item, is_inference=True) for item in item_chunk]
             yield self.padding_batch_inference(item_chunk)
 
@@ -169,3 +274,14 @@ class KeyphraseDataIterator(object):
         x = np.array([np.concatenate((x_[:max_len], [pad_id] * (max_len - len(x_)))) for x_ in x_raw])
         x = torch.tensor(x, dtype=torch.int64)
         return x, x_len_list
+
+    def _shutdown_workers(self):
+        if not self.worker_shutdown:
+            self.worker_shutdown = True
+            self.done_event.set()
+            for _ in self.workers:
+                self.input_queue.put(None)
+
+    def __del__(self):
+        if self.num_workers > 0:
+            self._shutdown_workers()
