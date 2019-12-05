@@ -3,7 +3,6 @@ import time
 import traceback
 import logging
 import os
-import gc
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -28,6 +27,9 @@ class BaseTrainer(object):
             self.model = nn.DataParallel(self.model)
         self.loss_func = nn.NLLLoss(ignore_index=self.vocab2id[PAD_WORD])
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer,
+                                                   self.args.schedule_step,
+                                                   self.args.schedule_gamma)
         self.logger = get_logger('train')
         self.train_loader = KeyphraseDataLoader(self.args.train_filename,
                                                 self.vocab2id,
@@ -35,7 +37,10 @@ class BaseTrainer(object):
                                                 self.args.max_src_len,
                                                 self.args.max_oov_count,
                                                 self.args.max_target_len,
-                                                'train')
+                                                'train',
+                                                pre_fetch=True,
+                                                token_field=args.token_field,
+                                                keyphrase_field=args.keyphrase_field)
         if self.args.train_from:
             self.dest_dir = os.path.dirname(self.args.train_from) + '/'
         else:
@@ -84,7 +89,6 @@ class BaseTrainer(object):
                 step += 1
                 self.writer.add_scalar('loss', loss, step)
                 del loss
-                gc.collect()
                 if step and step % self.args.save_model_step == 0:
                     torch.cuda.empty_cache()
                     self.evaluate_and_save_model(step, epoch)
