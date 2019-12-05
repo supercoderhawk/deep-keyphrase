@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
 import random
+import time
 import traceback
 import sys
 import threading
@@ -17,6 +18,10 @@ OOV_LIST = 'oov_list'
 TARGET_LIST = 'targets'
 TARGET = 'target'
 RAW_BATCH = 'raw'
+
+TRAIN_MODE = 'train'
+EVAL_MODE = 'eval'
+INFERENCE_MODE = 'inference'
 
 
 class ExceptionWrapper(object):
@@ -97,32 +102,35 @@ class KeyphraseDataIterator(object):
         self.data_source = loader.data_source
         self.batch_size = loader.batch_size
         self.num_workers = 8
-        if self.loader.mode == 'train':
+        if self.loader.mode == TRAIN_MODE:
             self.chunk_size = self.num_workers * 50
         else:
             self.chunk_size = self.batch_size
         self._data = self.load_data(self.chunk_size)
         self._batch_count_in_output_queue = 0
         self._redundant_batch = []
-        self.input_queue = multiprocessing.Queue(1000 * self.num_workers)
-        self.output_queue = multiprocessing.Queue(1000 * self.num_workers)
-        self.done_event = threading.Event()
-        self.worker_shutdown = False
         self.workers = []
-        for _ in range(self.num_workers):
-            worker = multiprocessing.Process(
-                target=self._train_data_worker_loop
-            )
-            self.workers.append(worker)
-        for worker in self.workers:
-            worker.daemon = True
-            worker.start()
+        self.worker_shutdown = False
 
-        if self.loader.mode == 'train' or self.loader.pre_fetch:
+        if self.loader.mode in {TRAIN_MODE, EVAL_MODE}:
+            self.input_queue = multiprocessing.Queue(1000 * self.num_workers)
+            self.output_queue = multiprocessing.Queue(1000 * self.num_workers)
+            self.done_event = threading.Event()
+
+            for _ in range(self.num_workers):
+                worker = multiprocessing.Process(
+                    target=self._train_data_worker_loop
+                )
+                self.workers.append(worker)
+            for worker in self.workers:
+                worker.daemon = True
+                worker.start()
+
+        if self.loader.mode in {TRAIN_MODE, EVAL_MODE} or self.loader.pre_fetch:
             self.__prefetch()
 
     def __iter__(self):
-        if self.loader.mode == 'train':
+        if self.loader.mode == TRAIN_MODE:
             yield from self.iter_train()
         else:
             yield from self.iter_inference()
@@ -138,7 +146,10 @@ class KeyphraseDataIterator(object):
 
     def _train_data_worker_loop(self):
         while True:
+            if self.done_event.is_set():
+                return
             raw_batch = self.input_queue.get()
+            # exit signal
             if raw_batch is None:
                 break
             try:
@@ -194,8 +205,20 @@ class KeyphraseDataIterator(object):
                 batch = flatten_items
             else:
                 batch.extend(flatten_items)
-
+        batches = self.reorder_batch_list(batches)
         return batches, batch
+
+    def reorder_batch(self, batch):
+        seq_idx_and_len = [(idx, len(item[TOKENS])) for idx, item in enumerate(batch)]
+        seq_idx_and_len = sorted(seq_idx_and_len, key=lambda i: i[1], reverse=True)
+        batch = [batch[idx] for idx, _ in seq_idx_and_len]
+        return batch
+
+    def reorder_batch_list(self, batches):
+        new_batches = []
+        for batch in batches:
+            new_batches.append(self.reorder_batch(batch))
+        return new_batches
 
     def flatten_raw_item(self, item):
         flatten_items = []
@@ -203,22 +226,12 @@ class KeyphraseDataIterator(object):
             flatten_items.append({'tokens': item['tokens'], 'phrase': phrase})
         return flatten_items
 
-    def flatten_item(self, item):
-        tokens = item[TOKENS]
-        token_with_oov = item[TOKENS_OOV]
-        oov_count = item[OOV_COUNT]
-        flatten_items = []
-        for phrase in item[TARGET_LIST]:
-            one2one_item = {TOKENS: tokens,
-                            TOKENS_OOV: token_with_oov,
-                            OOV_COUNT: oov_count,
-                            TARGET: phrase}
-            flatten_items.append(one2one_item)
-        return flatten_items
-
     def iter_inference(self):
         for item_chunk in self._data:
+            # item_chunk is same as a batch
             item_chunk = [self.loader.collate_fn(item, is_inference=True) for item in item_chunk]
+            if len(item_chunk) > 1:
+                item_chunk = self.reorder_batch(item_chunk)
             yield self.padding_batch_inference(item_chunk)
 
     def padding_batch_train(self, batch):
@@ -276,11 +289,16 @@ class KeyphraseDataIterator(object):
         return x, x_len_list
 
     def _shutdown_workers(self):
-        if not self.worker_shutdown:
+        # print('shutdown workers')
+        if not self.worker_shutdown and self.loader.mode in {'train', 'eval'}:
             self.worker_shutdown = True
             self.done_event.set()
             for _ in self.workers:
                 self.input_queue.put(None)
+                time.sleep(1)
+
+            for worker in self.workers:
+                worker.terminate()
 
     def __del__(self):
         if self.num_workers > 0:
