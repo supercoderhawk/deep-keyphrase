@@ -127,8 +127,7 @@ class CopyRnnEncoder(nn.Module):
             hidden_size=hidden_size,
             num_layers=self.num_layers,
             bidirectional=bidirectional,
-            batch_first=True
-        )
+            batch_first=True)
 
     def forward(self, src_dict):
         """
@@ -145,8 +144,7 @@ class CopyRnnEncoder(nn.Module):
         total_length = src_embed.size(1)
         packed_src_embed = nn.utils.rnn.pack_padded_sequence(src_embed,
                                                              src_lengths,
-                                                             batch_first=True,
-                                                             enforce_sorted=False)
+                                                             batch_first=True)
         state_size = [self.num_layers, batch_size, self.hidden_size]
         if self.bidirectional:
             state_size[0] *= 2
@@ -237,6 +235,15 @@ class CopyRnnDecoder(nn.Module):
                         prev_output_tokens,
                         prev_rnn_state,
                         src_dict):
+        """
+
+        :param encoder_output_dict:
+        :param prev_context_state:
+        :param prev_output_tokens:
+        :param prev_rnn_state:
+        :param src_dict:
+        :return:
+        """
         src_tokens = src_dict[TOKENS]
         src_tokens_with_oov = src_dict[TOKENS_OOV]
         batch_size = len(src_tokens)
@@ -258,7 +265,6 @@ class CopyRnnDecoder(nn.Module):
         if self.input_feeding:
             prev_context_state = prev_context_state.unsqueeze(1)
             decoder_input = torch.cat([src_embed, prev_context_state, copy_state], dim=2)
-            # print(decoder_input.size())
         else:
             decoder_input = torch.cat([src_embed, copy_state], dim=2)
         decoder_input = F.dropout(decoder_input, p=self.dropout, training=self.training)
@@ -323,6 +329,14 @@ class CopyRnnDecoder(nn.Module):
         return copy_state
 
     def get_copy_score(self, encoder_out, src_tokens_with_oov, decoder_output, encoder_output_mask):
+        """
+
+        :param encoder_out:
+        :param src_tokens_with_oov:
+        :param decoder_output:
+        :param encoder_output_mask:
+        :return:
+        """
         # copy_score: B x L
         copy_score_in_seq = torch.bmm(torch.tanh(self.copy_proj(encoder_out)),
                                       decoder_output.permute(0, 2, 1)).squeeze(2)
