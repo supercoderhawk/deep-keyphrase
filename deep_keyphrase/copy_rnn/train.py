@@ -8,7 +8,7 @@ from pysenal import write_json, read_json
 from deep_keyphrase.utils.vocab_loader import load_vocab
 from deep_keyphrase.copy_rnn.model import CopyRNN
 from deep_keyphrase.base_trainer import BaseTrainer
-from deep_keyphrase.dataloader import (KeyphraseDataLoader, TOKENS, TARGET)
+from deep_keyphrase.dataloader import TOKENS, TARGET
 from deep_keyphrase.copy_rnn.predict import CopyRnnPredictor
 
 
@@ -87,6 +87,8 @@ class CopyRnnTrainer(BaseTrainer):
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_norm)
 
         self.optimizer.step()
+        if self.args.schedule_lr:
+            self.scheduler.step()
         return loss
 
     def evaluate(self, step):
@@ -99,26 +101,49 @@ class CopyRnnTrainer(BaseTrainer):
         pred_valid_filename += '.batch_{}.pred.jsonl'.format(step)
         eval_filename = self.dest_dir + self.args.exp_name + '.batch_{}.eval.json'.format(step)
         predictor.eval_predict(self.args.valid_filename, pred_valid_filename,
-                               self.args.eval_batch_size, self.model, True)
-        valid_macro_ret = self.macro_evaluator.evaluate(pred_valid_filename)
-        # valid_micro_ret = self.micro_evaluator.evaluate(pred_valid_filename)
-        for n, counter in valid_macro_ret.items():
+                               self.args.eval_batch_size, self.model, True,
+                               token_field=self.args.token_field,
+                               keyphrase_field=self.args.keyphrase_field)
+        valid_macro_all_ret = self.macro_evaluator.evaluate(pred_valid_filename)
+        valid_macro_present_ret = self.macro_evaluator.evaluate(pred_valid_filename, 'present')
+        valid_macro_absent_ret = self.macro_evaluator.evaluate(pred_valid_filename, 'absent')
+
+        for n, counter in valid_macro_all_ret.items():
             for k, v in counter.items():
                 name = 'valid/macro_{}@{}'.format(k, n)
                 self.writer.add_scalar(name, v, step)
+        for n in self.eval_topn:
+            name = 'present/valid macro_f1@{}'.format(n)
+            self.writer.add_scalar(name, valid_macro_present_ret[n]['f1'], step)
+        for n in self.eval_topn:
+            name = 'absent/valid macro_f1@{}'.format(n)
+            self.writer.add_scalar(name, valid_macro_absent_ret[n]['f1'], step)
         pred_test_filename = self.dest_dir + self.get_basename(self.args.test_filename)
         pred_test_filename += '.batch_{}.pred.jsonl'.format(step)
 
         predictor.eval_predict(self.args.test_filename, pred_test_filename,
                                self.args.eval_batch_size, self.model, True)
-        test_macro_ret = self.macro_evaluator.evaluate(pred_test_filename)
-        for n, counter in test_macro_ret.items():
+        test_macro_all_ret = self.macro_evaluator.evaluate(pred_test_filename)
+        test_macro_present_ret = self.macro_evaluator.evaluate(pred_test_filename, 'present')
+        test_macro_absent_ret = self.macro_evaluator.evaluate(pred_test_filename, 'absent')
+        for n, counter in test_macro_all_ret.items():
             for k, v in counter.items():
                 name = 'test/macro_{}@{}'.format(k, n)
                 self.writer.add_scalar(name, v, step)
-        write_json(eval_filename, {'valid_macro': valid_macro_ret, 'test_macro': test_macro_ret})
-        # valid_micro_ret = self.micro_evaluator.evaluate(pred_test_filename)
-        return valid_macro_ret[self.eval_topn[-1]]['f1']
+        for n in self.eval_topn:
+            name = 'present/test macro_f1@{}'.format(n)
+            self.writer.add_scalar(name, test_macro_present_ret[n]['f1'], step)
+        for n in self.eval_topn:
+            name = 'absent/test macro_f1@{}'.format(n)
+            self.writer.add_scalar(name, test_macro_absent_ret[n]['f1'], step)
+        total_statistics = {'valid_macro': valid_macro_all_ret,
+                            'valid_present_macro': valid_macro_present_ret,
+                            'valid_absent_macro': valid_macro_absent_ret,
+                            'test_macro': test_macro_all_ret,
+                            'test_present_macro': test_macro_present_ret,
+                            'test_absent_macro': test_macro_absent_ret}
+        write_json(eval_filename, total_statistics)
+        return valid_macro_all_ret[self.eval_topn[-1]]['f1']
 
     def parse_args(self):
         parser = argparse.ArgumentParser()
@@ -131,10 +156,12 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument("-vocab_path", required=True, type=str, help='')
         parser.add_argument("-vocab_size", type=int, default=500000, help='')
         parser.add_argument("-train_from", default='', type=str, help='')
+        parser.add_argument("-token_field", default='tokens', type=str, help='')
+        parser.add_argument("-keyphrase_field", default='keyphrases', type=str, help='')
         parser.add_argument("-epochs", type=int, default=10, help='')
         parser.add_argument("-batch_size", type=int, default=64, help='')
-        parser.add_argument("-learning_rate", type=float, default=1e-4, help='')
-        parser.add_argument("-eval_batch_size", type=int, default=20, help='')
+        parser.add_argument("-learning_rate", type=float, default=1e-3, help='')
+        parser.add_argument("-eval_batch_size", type=int, default=50, help='')
         parser.add_argument("-dropout", type=float, default=0.1, help='')
         parser.add_argument("-grad_norm", type=float, default=0.0, help='')
         parser.add_argument("-max_grad", type=float, default=5.0, help='')
@@ -144,8 +171,10 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument('-tensorboard_dir', type=str, default='', help='')
         parser.add_argument('-logfile', type=str, default='train_log.log', help='')
         parser.add_argument('-save_model_step', type=int, default=5000, help='')
-        parser.add_argument('-early_stop_tolerance', type=int, default=50, help='')
-        parser.add_argument('-train_parallel', action='store_true', help='')
+        parser.add_argument('-early_stop_tolerance', type=int, default=100, help='')
+        parser.add_argument('-schedule_lr', action='store_true', help='')
+        parser.add_argument('-schedule_step', type=int, default=100000, help='')
+        parser.add_argument('-schedule_gamma', type=float, default=0.5, help='')
 
         # model specific parameter
         parser.add_argument("-embed_size", type=int, default=200, help='')
