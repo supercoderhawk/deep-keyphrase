@@ -1,6 +1,4 @@
-# Add your requirements here like:
-# numpy
-# scipy>=0.9
 torch>=1.2.0
 pysenal>=0.0.8
 tensorboard>=2.0.1
+munch==2.5.0
