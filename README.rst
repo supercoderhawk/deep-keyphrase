@@ -5,6 +5,8 @@ deep-keyphrase
 
 Implement some keyphrase generation algorithm
 
+.. image:: https://img.shields.io/github/workflow/status/supercoderhawk/deep-keyphrase/ci   :alt: GitHub Workflow Status
+
 
 
 Description

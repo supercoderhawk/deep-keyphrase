@@ -42,3 +42,5 @@ cover/*
 MANIFEST
 /data
 /runners
+.env
+Pipfile
