@@ -1,14 +1,15 @@
 # -*- coding: UTF-8 -*-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.modules.transformer import (TransformerEncoder, TransformerDecoder,
                                           TransformerEncoderLayer, TransformerDecoderLayer)
 from deep_keyphrase.dataloader import TOKENS, TOKENS_LENS, TOKENS_OOV, UNK_WORD, PAD_WORD, OOV_COUNT
 
 
-def get_position_encoding(input_tensor, position, dim_size):
+def get_position_encoding(input_tensor):
+    batch_size, position, dim_size = input_tensor.size()
     assert dim_size % 2 == 0
-    batch_size = len(input_tensor)
     num_timescales = dim_size // 2
     time_scales = torch.arange(0, position + 1, dtype=torch.float).unsqueeze(1)
     dim_scales = torch.arange(0, num_timescales, dtype=torch.float).unsqueeze(0)
@@ -68,6 +69,7 @@ class CopyTransformerEncoder(nn.Module):
                  feed_forward_dim, dropout, num_layers):
         super().__init__()
         self.embedding = embedding
+        self.dropout = dropout
         layer = TransformerEncoderLayer(d_model=input_dim,
                                         nhead=head_size,
                                         dim_feedforward=feed_forward_dim,
@@ -76,15 +78,18 @@ class CopyTransformerEncoder(nn.Module):
 
     def forward(self, src_dict):
         batch_size, max_len = src_dict[TOKENS].size()
-        # mask_range = torch.arange(max_len).expand(batch_size, max_len)
-        mask_range = torch.zeros(batch_size, max_len, dtype=torch.bool)
+        mask_range = torch.arange(max_len).unsqueeze(0).repeat(batch_size, 1)
+
         if torch.cuda.is_available():
             mask_range = mask_range.cuda()
-        # mask = mask_range > src_dict[TOKENS_LENS].unsqueeze(1)
+        mask = mask_range >= src_dict[TOKENS_LENS]
+        # mask = (mask_range > src_dict[TOKENS_LENS].unsqueeze(1)).expand(batch_size, max_len, max_len)
         src_embed = self.embedding(src_dict[TOKENS]).transpose(1, 0)
-        # print(src_embed.size(), mask.size())
-        output = self.encoder(src_embed).transpose(1, 0)
-        return output, mask_range
+        pos_embed = get_position_encoding(src_embed)
+        src_embed = src_embed + pos_embed
+        src_embed = F.dropout(src_embed, p=self.dropout, training=self.training)
+        output = self.encoder(src_embed, src_key_padding_mask=mask).transpose(1, 0)
+        return output, mask
 
 
 class CopyTransformerDecoder(nn.Module):
@@ -92,6 +97,7 @@ class CopyTransformerDecoder(nn.Module):
                  dropout, num_layers, target_max_len, max_oov_count):
         super().__init__()
         self.embedding = embedding
+        self.dropout = dropout
         self.vocab_size = embedding.num_embeddings
         self.vocab2id = vocab2id
         layer = TransformerDecoderLayer(d_model=input_dim,
@@ -124,18 +130,19 @@ class CopyTransformerDecoder(nn.Module):
         # map copied oov tokens to OOV idx to avoid embedding lookup error
         prev_output_tokens[prev_output_tokens >= self.vocab_size] = self.vocab2id[UNK_WORD]
         token_embed = self.embedding(prev_output_tokens)
-        pos_embed = get_position_encoding(token_embed, position, self.input_dim)
+
+        pos_embed = get_position_encoding(token_embed)
         # B x seq_len x H
         src_embed = token_embed + pos_embed
-        # print(token_embed.size(),pos_embed.size())
-        # print(src_embed.size(),copy_state.size())
         decoder_input = self.embed_proj(torch.cat([src_embed, copy_state], dim=2)).transpose(1, 0)
-        # print(decoder_input.size())
+        decoder_input = F.dropout(decoder_input, p=self.dropout, training=self.training)
         decoder_input_mask = torch.triu(torch.ones(self.input_dim, self.input_dim), 1)
         # B x seq_len x H
-        decoder_output = self.decoder(tgt=decoder_input, memory=encoder_output.transpose(1, 0), )
+        decoder_output = self.decoder(tgt=decoder_input,
+                                      memory=encoder_output.transpose(1, 0),
+                                      memory_key_padding_mask=decoder_input_mask)
         decoder_output = decoder_output.transpose(1, 0)
-        # tgt_mask=decoder_input_mask, memory_mask=encoder_mask)
+        
         # B x 1 x H
         decoder_output = decoder_output[:, -1:, :]
         generation_logits = self.generate_proj(decoder_output).squeeze(1)
