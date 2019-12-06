@@ -172,6 +172,7 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument('-logfile', type=str, default='train_log.log', help='')
         parser.add_argument('-save_model_step', type=int, default=5000, help='')
         parser.add_argument('-early_stop_tolerance', type=int, default=100, help='')
+        parser.add_argument('-train_parallel', action='store_true', help='')
         parser.add_argument('-schedule_lr', action='store_true', help='')
         parser.add_argument('-schedule_step', type=int, default=100000, help='')
         parser.add_argument('-schedule_gamma', type=float, default=0.5, help='')
