@@ -6,7 +6,7 @@ VALID_FILENAME=$DATA_DIR/kp20k.valid.jsonl
 TEST_FILENAME=$DATA_DIR/kp20k.test.jsonl
 VOCAB_PATH=$DATA_DIR/vocab_kp20k.txt
 DEST_DIR=$DATA_DIR/kp20k/
-EXP_NAME=copyrnn_basic
+EXP_NAME=copyrnn_kp20k_basic
 
 #export CUDA_VISIBLE_DEVICES=1
 
