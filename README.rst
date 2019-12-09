@@ -21,6 +21,9 @@ CopyRNN
 .. __: https://arxiv.org/abs/1704.06879
 
 
+ToDo List
+>>>>>>>>>>>>>>>
+
 CopyCNN
 
 CopyTransformer
@@ -32,14 +35,28 @@ Usage
 required files (4 files in total)
 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
-1. vocab_file: word line by line (don't with index!!!!)
+1. vocab_file: word line by line (don't with index!!!!) ::
+
+    this
+    paper
+    proposes
 
 2. training, valid and test file
 
 data format for training, valid and test
->>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-json line format, every line is a dict
+""""""""""""""""""""""""""""""""""""""""""""""""""
+json line format, every line is a dict::
 
+    {'tokens': ['this', 'paper', 'proposes', 'using', 'virtual', 'reality', 'to', 'enhance', 'the', 'perception', 'of', 'actions', 'by', 'distant', 'users', 'on', 'a', 'shared', 'application', '.', 'here', ',', 'distance', 'may', 'refer', 'either', 'to', 'space', '(', 'e.g.', 'in', 'a', 'remote', 'synchronous', 'collaboration', ')', 'or', 'time', '(', 'e.g.', 'during', 'playback', 'of', 'recorded', 'actions', ')', '.', 'our', 'approach', 'consists', 'in', 'immersing', 'the', 'application', 'in', 'a', 'virtual', 'inhabited', '3d', 'space', 'and', 'mimicking', 'user', 'actions', 'by', 'animating', 'avatars', '.', 'we', 'illustrate', 'this', 'approach', 'with', 'two', 'applications', ',', 'the', 'one', 'for', 'remote', 'collaboration', 'on', 'a', 'shared', 'application', 'and', 'the', 'other', 'to', 'playback', 'recorded', 'sequences', 'of', 'user', 'actions', '.', 'we', 'suggest', 'this', 'could', 'be', 'a', 'low', 'cost', 'enhancement', 'for', 'telepresence', '.'] ,
+    'keyphrases': [['telepresence'], ['animation'], ['avatars'], ['application', 'sharing'], ['collaborative', 'virtual', 'environments']]}
+
+
+Training
+>>>>>>>>>>>>>>>
+::
+
+    mkdir data/kp20k
+    bash scripts/train_copyrnn_kp20k.sh
 
 
 Notes
