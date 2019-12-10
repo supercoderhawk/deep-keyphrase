@@ -53,9 +53,15 @@ json line format, every line is a dict::
 
 Training
 >>>>>>>>>>>>>>>
+download the kp20k_
+
+.. _kp20k: https://drive.google.com/uc?id=1ZTQEGZSq06kzlPlOv4yGjbUpoDrNxebR&export=download
+
 ::
 
-    mkdir data/kp20k
+    mkdir data/raw/kp20k_new
+    # unzip kp20k data put the  into above folder
+    bash scripts/prepare_kp20k.sh
     bash scripts/train_copyrnn_kp20k.sh
 
 
