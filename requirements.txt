@@ -2,3 +2,4 @@ torch>=1.2.0
 pysenal>=0.0.8
 tensorboard>=2.0.1
 munch==2.5.0
+nltk
