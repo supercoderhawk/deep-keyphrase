@@ -13,5 +13,6 @@ EXP_NAME=copyrnn_kp20k_basic
 python3 deep_keyphrase/copy_rnn/train.py -exp_name $EXP_NAME \
   -train_filename $TRAIN_FILENAME \
   -valid_filename $VALID_FILENAME -test_filename $TEST_FILENAME \
+  -token_field abstract_tokens -keyphrase_field keyword_tokens \
   -vocab_path $VOCAB_PATH -dest_dir $DEST_DIR \
   -bidirectional -teacher_forcing -copy_net
