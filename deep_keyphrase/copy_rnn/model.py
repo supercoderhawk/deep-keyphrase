@@ -18,14 +18,34 @@ class Attention(nn.Module):
         self.score_mode = score_mode
         if self.score_mode == 'general':
             self.attn = nn.Linear(self.output_dim, self.input_dim, bias=False)
+        elif self.score_mode == 'concat':
+            self.query_proj = nn.Linear(self.output_dim, self.output_dim)
+            self.key_proj = nn.Linear(self.output_dim, self.input_dim)
+            self.concat_proj = nn.Linear(1, self.output_dim)
+        elif self.score_mode == 'dot':
+            if self.input_dim != self.output_dim:
+                raise ValueError('input and output dim must be equal when attention score mode is dot')
+        else:
+            raise ValueError('attention score mode error')
         self.output_proj = nn.Linear(self.input_dim + self.output_dim, self.output_dim)
 
     def score(self, query, key, encoder_padding_mask):
+        """
+
+        :param query:
+        :param key:
+        :param encoder_padding_mask:
+        :return:
+        """
         if self.score_mode == 'general':
             attn_weights = torch.bmm(self.attn(query), key.permute(0, 2, 1))
             attn_weights = torch.squeeze(attn_weights, 1)
-        else:
-            raise ValueError('value error')
+        elif self.score_mode == 'concat':
+            attn_weights = self.concat_proj(torch.tanh(self.query_proj(query) + self.key_proj(key)))
+            attn_weights = torch.squeeze(attn_weights, 2)
+        elif self.score_mode == 'dot':
+            attn_weights = torch.bmm(query, key.permute(0, 2, 1))
+            attn_weights = torch.squeeze(attn_weights, 1)
         # mask input padding to -Inf, they will be zero after softmax.
         if encoder_padding_mask is not None:
             attn_weights.masked_fill_(encoder_padding_mask, float('-inf'))
