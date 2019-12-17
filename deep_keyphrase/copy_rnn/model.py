@@ -164,7 +164,8 @@ class CopyRnnEncoder(nn.Module):
         total_length = src_embed.size(1)
         packed_src_embed = nn.utils.rnn.pack_padded_sequence(src_embed,
                                                              src_lengths,
-                                                             batch_first=True)
+                                                             batch_first=True,
+                                                             enforce_sorted=False)
         state_size = [self.num_layers, batch_size, self.hidden_size]
         if self.bidirectional:
             state_size[0] *= 2
