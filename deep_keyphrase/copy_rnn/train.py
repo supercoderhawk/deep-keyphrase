@@ -100,10 +100,11 @@ class CopyRnnTrainer(BaseTrainer):
         pred_valid_filename = self.dest_dir + self.get_basename(self.args.valid_filename)
         pred_valid_filename += '.batch_{}.pred.jsonl'.format(step)
         eval_filename = self.dest_dir + self.args.exp_name + '.batch_{}.eval.json'.format(step)
-        predictor.eval_predict(self.args.valid_filename, pred_valid_filename,
-                               self.args.eval_batch_size, self.model, True,
-                               token_field=self.args.token_field,
-                               keyphrase_field=self.args.keyphrase_field)
+        predictor.eval_predict(src_filename=self.args.valid_filename,
+                               dest_filename=pred_valid_filename,
+                               args=self.args,
+                               model=self.model,
+                               remove_existed=True)
         valid_macro_all_ret = self.macro_evaluator.evaluate(pred_valid_filename)
         valid_macro_present_ret = self.macro_evaluator.evaluate(pred_valid_filename, 'present')
         valid_macro_absent_ret = self.macro_evaluator.evaluate(pred_valid_filename, 'absent')
@@ -121,8 +122,11 @@ class CopyRnnTrainer(BaseTrainer):
         pred_test_filename = self.dest_dir + self.get_basename(self.args.test_filename)
         pred_test_filename += '.batch_{}.pred.jsonl'.format(step)
 
-        predictor.eval_predict(self.args.test_filename, pred_test_filename,
-                               self.args.eval_batch_size, self.model, True)
+        predictor.eval_predict(src_filename=self.args.test_filename,
+                               dest_filename=pred_test_filename,
+                               args=self.args,
+                               model=self.model,
+                               remove_existed=True)
         test_macro_all_ret = self.macro_evaluator.evaluate(pred_test_filename)
         test_macro_present_ret = self.macro_evaluator.evaluate(pred_test_filename, 'present')
         test_macro_absent_ret = self.macro_evaluator.evaluate(pred_test_filename, 'absent')
@@ -145,7 +149,7 @@ class CopyRnnTrainer(BaseTrainer):
         write_json(eval_filename, total_statistics)
         return valid_macro_all_ret[self.eval_topn[-1]]['f1']
 
-    def parse_args(self):
+    def parse_args(self, args=None):
         parser = argparse.ArgumentParser()
         # train and evaluation parameter
         parser.add_argument("-exp_name", required=True, type=str, help='')
@@ -176,6 +180,8 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument('-schedule_lr', action='store_true', help='')
         parser.add_argument('-schedule_step', type=int, default=100000, help='')
         parser.add_argument('-schedule_gamma', type=float, default=0.5, help='')
+        parser.add_argument('-processed', action='store_true', help='')
+        parser.add_argument('-prefetch', action='store_true', help='')
 
         # model specific parameter
         parser.add_argument("-embed_size", type=int, default=200, help='')
@@ -190,7 +196,7 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument("-copy_net", action='store_true', help='')
         parser.add_argument("-input_feeding", action='store_true', help='')
 
-        args = parser.parse_args()
+        args = parser.parse_args(args)
         return args
 
 
