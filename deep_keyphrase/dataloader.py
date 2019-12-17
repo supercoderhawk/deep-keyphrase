@@ -3,7 +3,6 @@ import random
 import time
 import traceback
 import sys
-import threading
 import numpy as np
 import torch
 import torch.multiprocessing as multiprocessing
@@ -35,29 +34,26 @@ class ExceptionWrapper(object):
 
 
 class KeyphraseDataLoader(object):
-    def __init__(self, data_source, vocab2id, batch_size, max_src_len,
-                 max_oov_count, max_target_len, mode,
-                 pre_fetch=False,
-                 shuffle_in_batch=False,
-                 token_field='tokens',
-                 keyphrase_field='keyphrases'):
+    def __init__(self, data_source, vocab2id, mode, args):
         self.data_source = data_source
         self.vocab2id = vocab2id
         self.vocab_size = len(self.vocab2id)
-        self.batch_size = batch_size
-        self.max_src_len = max_src_len
-        self.max_oov_count = max_oov_count
-        self.max_target_len = max_target_len
+        self.args = args
+        self.batch_size = args.batch_size
+        self.max_src_len = args.max_src_len
+        self.max_oov_count = args.max_oov_count
+        self.max_target_len = args.max_target_len
         self.mode = mode
-        self.pre_fetch = pre_fetch
-        self.shuffle_in_batch = shuffle_in_batch
-        self.token_field = token_field
-        self.keyphrases_field = keyphrase_field
+        self.pre_fetch = args.prefetch
+        self.shuffle_in_batch = args.shuffle_in_batch
+        self.token_field = args.token_field
+        self.keyphrases_field = args.keyphrase_field
+        self.is_inference = mode != TRAIN_MODE
 
     def __iter__(self):
         return iter(KeyphraseDataIterator(self))
 
-    def collate_fn(self, item, is_inference=False):
+    def collate_fn(self, item):
         tokens = item[self.token_field]
         token_ids_with_oov = []
         token_ids = []
@@ -84,7 +80,7 @@ class KeyphraseDataLoader(object):
                       OOV_COUNT: len(oov_list),
                       OOV_LIST: oov_list}
 
-        if is_inference:
+        if self.is_inference:
             final_item[RAW_BATCH] = item
         else:
             keyphrase = item['phrase']
@@ -101,9 +97,14 @@ class KeyphraseDataIterator(object):
         self.loader = loader
         self.data_source = loader.data_source
         self.batch_size = loader.batch_size
-        self.num_workers = 8
+        self.num_workers = multiprocessing.cpu_count()
+        # !!! important !!!
+        # set torch num thread for 1 to avoid deadlocking when call torch.tensor in child process
+        # reference: https://github.com/pytorch/pytorch/issues/17199#issuecomment-465313245
+        torch.set_num_threads(1)
+
         if self.loader.mode == TRAIN_MODE:
-            self.chunk_size = self.num_workers * 50
+            self.chunk_size = self.num_workers * 10
         else:
             self.chunk_size = self.batch_size
         self._data = self.load_data(self.chunk_size)
@@ -112,22 +113,19 @@ class KeyphraseDataIterator(object):
         self.workers = []
         self.worker_shutdown = False
 
-        if self.loader.mode in {TRAIN_MODE, EVAL_MODE}:
-            self.input_queue = multiprocessing.Queue(1000 * self.num_workers)
-            self.output_queue = multiprocessing.Queue(1000 * self.num_workers)
-            self.done_event = threading.Event()
-
+        if self.loader.mode == TRAIN_MODE:
+            self.input_queue = multiprocessing.Queue(-1)
+            self.output_queue = multiprocessing.Queue(-1)
+            self.done_event = multiprocessing.Event()
+            self.__prefetch()
             for _ in range(self.num_workers):
                 worker = multiprocessing.Process(
-                    target=self._train_data_worker_loop
+                    target=self._data_worker_loop
                 )
                 self.workers.append(worker)
             for worker in self.workers:
                 worker.daemon = True
                 worker.start()
-
-        if self.loader.mode in {TRAIN_MODE, EVAL_MODE} or self.loader.pre_fetch:
-            self.__prefetch()
 
     def __iter__(self):
         if self.loader.mode == TRAIN_MODE:
@@ -144,32 +142,52 @@ class KeyphraseDataIterator(object):
             raise TypeError('input filename type is error')
         return get_chunk(data, chunk_size)
 
-    def _train_data_worker_loop(self):
+    def _data_worker_loop(self):
         while True:
             if self.done_event.is_set():
-                return
+                break
+
             raw_batch = self.input_queue.get()
+
             # exit signal
             if raw_batch is None:
                 break
             try:
                 batch = []
                 for item in raw_batch:
-                    batch.append(self.loader.collate_fn(item))
+                    if self.loader.args.processed:
+                        batch.append(item)
+                    else:
+                        batch.append(self.loader.collate_fn(item))
                 if self.loader.shuffle_in_batch:
                     random.shuffle(batch)
-                batch = self.padding_batch_train(batch)
+
+                if self.loader.is_inference:
+                    batch = self.padding_batch_inference(batch)
+                else:
+                    batch = self.padding_batch_train(batch)
+
                 self.output_queue.put(batch)
+
             except Exception as e:
                 self.output_queue.put(ExceptionWrapper(sys.exc_info()))
 
     def __prefetch(self):
-        item_chunk = next(self._data)
-        batches, redundant_batch = self.get_batches(item_chunk, [])
-        self._redundant_batch = redundant_batch
-        for batch in batches:
-            self.input_queue.put(batch)
-            self._batch_count_in_output_queue += 1
+        if self.loader.mode == TRAIN_MODE:
+            item_chunk = next(self._data)
+            batches, redundant_batch = self.get_batches(item_chunk, [])
+            self._redundant_batch = redundant_batch
+            for batch in batches:
+                self.input_queue.put(batch)
+                self._batch_count_in_output_queue += 1
+        else:
+            for _ in range(self.num_workers * 100):
+                try:
+                    item_chunk = next(self._data)
+                except StopIteration:
+                    break
+                self.input_queue.put(item_chunk)
+                self._batch_count_in_output_queue += 1
 
     def iter_train(self):
         redundant_batch = self._redundant_batch
@@ -189,9 +207,26 @@ class KeyphraseDataIterator(object):
             self._batch_count_in_output_queue = len(batches)
         if redundant_batch:
             self.input_queue.put(redundant_batch)
-            yield self.output_queue.get()
+            self._batch_count_in_output_queue += 1
+
+        if self._batch_count_in_output_queue:
+            for idx in range(self._batch_count_in_output_queue):
+                yield self.output_queue.get()
 
     def get_batches(self, item_chunk, batch):
+        if self.loader.args.processed:
+            return self.get_batches_processed(item_chunk, batch)
+        else:
+            return self.get_batches_raw(item_chunk, batch)
+
+    def get_batches_processed(self, item_chunk, batch):
+        batches = []
+        for new_batch in get_chunk(batch + item_chunk, self.batch_size):
+            batches.append(new_batch)
+        return batches, []
+
+    def get_batches_raw(self, item_chunk, batch):
+
         batches = []
 
         for item in item_chunk:
@@ -205,7 +240,7 @@ class KeyphraseDataIterator(object):
                 batch = flatten_items
             else:
                 batch.extend(flatten_items)
-        batches = self.reorder_batch_list(batches)
+        # batches = self.reorder_batch_list(batches)
         return batches, batch
 
     def reorder_batch(self, batch):
@@ -215,6 +250,11 @@ class KeyphraseDataIterator(object):
         return batch
 
     def reorder_batch_list(self, batches):
+        """
+        for onnx format compatibility
+        :param batches:
+        :return:
+        """
         new_batches = []
         for batch in batches:
             new_batches.append(self.reorder_batch(batch))
@@ -226,10 +266,26 @@ class KeyphraseDataIterator(object):
             flatten_items.append({'tokens': item['tokens'], 'phrase': phrase})
         return flatten_items
 
+    def iter_inference_parallel(self):
+        assert not self._redundant_batch
+        assert self.workers
+        for item_chunk in self._data:
+            if self._batch_count_in_output_queue > 0:
+                yield self.output_queue.get()
+                self.input_queue.put(item_chunk)
+            else:
+                self.input_queue.put(item_chunk)
+                yield self.output_queue.get()
+        if self._batch_count_in_output_queue:
+            for _ in range(self._batch_count_in_output_queue):
+                yield self.output_queue.get()
+
     def iter_inference(self):
+        assert not self._batch_count_in_output_queue
+        assert not self._redundant_batch
         for item_chunk in self._data:
             # item_chunk is same as a batch
-            item_chunk = [self.loader.collate_fn(item, is_inference=True) for item in item_chunk]
+            item_chunk = [self.loader.collate_fn(item) for item in item_chunk]
             if len(item_chunk) > 1:
                 item_chunk = self.reorder_batch(item_chunk)
             yield self.padding_batch_inference(item_chunk)
@@ -289,17 +345,16 @@ class KeyphraseDataIterator(object):
         return x, x_len_list
 
     def _shutdown_workers(self):
-        # print('shutdown workers')
-        if not self.worker_shutdown and self.loader.mode in {'train', 'eval'}:
+        if not self.worker_shutdown and self.loader.mode in {TRAIN_MODE}:
             self.worker_shutdown = True
             self.done_event.set()
-            for _ in self.workers:
-                self.input_queue.put(None)
-                time.sleep(1)
+
+            self.input_queue.close()
+            self.output_queue.close()
 
             for worker in self.workers:
                 worker.terminate()
 
     def __del__(self):
-        if self.num_workers > 0:
+        if self.workers:
             self._shutdown_workers()
