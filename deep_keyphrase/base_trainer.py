@@ -17,6 +17,7 @@ from deep_keyphrase.utils.constants import PAD_WORD
 class BaseTrainer(object):
     def __init__(self, args, model):
         torch.manual_seed(0)
+        torch.autograd.set_detect_anomaly(True)
         self.args = args
         self.vocab2id = load_vocab(self.args.vocab_path, self.args.vocab_size)
 
@@ -31,16 +32,10 @@ class BaseTrainer(object):
                                                    self.args.schedule_step,
                                                    self.args.schedule_gamma)
         self.logger = get_logger('train')
-        self.train_loader = KeyphraseDataLoader(self.args.train_filename,
-                                                self.vocab2id,
-                                                self.args.batch_size,
-                                                self.args.max_src_len,
-                                                self.args.max_oov_count,
-                                                self.args.max_target_len,
-                                                'train',
-                                                pre_fetch=True,
-                                                token_field=args.token_field,
-                                                keyphrase_field=args.keyphrase_field)
+        self.train_loader = KeyphraseDataLoader(data_source=self.args.train_filename,
+                                                vocab2id=self.vocab2id,
+                                                mode='train',
+                                                args=args)
         if self.args.train_from:
             self.dest_dir = os.path.dirname(self.args.train_from) + '/'
         else:
