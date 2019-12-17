@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 import os
 import torch
+from munch import Munch
 from pysenal import read_file, append_jsonlines
 from deep_keyphrase.base_predictor import BasePredictor
 from deep_keyphrase.copy_rnn.model import CopyRNN
@@ -13,6 +14,18 @@ from deep_keyphrase.utils.tokenizer import token_char_tokenize
 
 class CopyRnnPredictor(BasePredictor):
     def __init__(self, model_info, vocab_info, beam_size, max_target_len, max_src_length):
+        """
+
+        :param model_info: define the model information.
+                            str type: model path
+                            dict type: must have `model` and `config` field,
+                                        indicate the model object and config object
+
+        :param vocab_info:
+        :param beam_size:
+        :param max_target_len:
+        :param max_src_length:
+        """
         super().__init__(model_info)
         if isinstance(vocab_info, str):
             self.vocab2id = load_vocab(vocab_info)
@@ -33,6 +46,13 @@ class CopyRnnPredictor(BasePredictor):
                                         id2vocab=self.id2vocab,
                                         bos_idx=self.vocab2id[BOS_WORD],
                                         args=self.config)
+        self.pred_base_config = {'max_oov_count': self.config.max_oov_count,
+                                 'max_src_len': self.max_src_len,
+                                 'max_target_len': self.max_target_len,
+                                 'prefetch': False,
+                                 'shuffle_in_batch': False,
+                                 'token_field': TOKENS,
+                                 'keyphrase_field': 'keyphrases'}
 
     def predict(self, text_list, batch_size=10, delimiter=None, tokenized=False):
         """
@@ -51,33 +71,26 @@ class CopyRnnPredictor(BasePredictor):
             text_list = [{TOKENS: i} for i in text_list]
         else:
             text_list = [{TOKENS: token_char_tokenize(i)} for i in text_list]
-
+        args = Munch({'batch_size': batch_size, **self.pred_base_config})
         loader = KeyphraseDataLoader(data_source=text_list,
                                      vocab2id=self.vocab2id,
-                                     batch_size=batch_size,
-                                     max_oov_count=self.config.max_oov_count,
-                                     max_src_len=self.max_src_len,
-                                     max_target_len=self.max_target_len,
-                                     mode=INFERENCE_MODE)
+                                     mode=INFERENCE_MODE,
+                                     args=args)
         result = []
         for batch in loader:
             with torch.no_grad():
                 result.extend(self.beam_searcher.beam_search(batch, delimiter=delimiter))
         return result
 
-    def eval_predict(self, src_filename, dest_filename, batch_size,
-                     model=None, remove_existed=False,
-                     token_field='tokens', keyphrase_field='keyphrases'):
+    def eval_predict(self, src_filename, dest_filename, args,
+                     model=None, remove_existed=False):
+        args_dict = vars(args)
+        args_dict['batch_size'] = args_dict['eval_batch_size']
+        args = Munch(args_dict)
         loader = KeyphraseDataLoader(data_source=src_filename,
                                      vocab2id=self.vocab2id,
-                                     batch_size=batch_size,
-                                     max_oov_count=self.config.max_oov_count,
-                                     max_src_len=self.max_src_len,
-                                     max_target_len=self.max_target_len,
                                      mode=EVAL_MODE,
-                                     pre_fetch=True,
-                                     token_field=token_field,
-                                     keyphrase_field=keyphrase_field)
+                                     args=args)
 
         if os.path.exists(dest_filename):
             print('destination filename {} existed'.format(dest_filename))
