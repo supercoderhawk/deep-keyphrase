@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 import torch
 from deep_keyphrase.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
-                                       OOV_COUNT, OOV_LIST, EOS_WORD)
+                                       OOV_COUNT, OOV_LIST, EOS_WORD, UNK_WORD)
 
 
 class BeamSearch(object):
@@ -113,12 +113,16 @@ class BeamSearch(object):
             for beam in batch:
                 phrase = []
                 for idx in beam:
-                    if self.id2vocab[idx] == EOS_WORD:
+                    if self.id2vocab.get(idx) == EOS_WORD:
                         break
                     if idx in self.id2vocab:
                         phrase.append(self.id2vocab[idx])
                     else:
-                        phrase.append(oov_list[idx - len(self.id2vocab)])
+                        oov_idx = idx - len(self.id2vocab)
+                        if oov_idx < len(oov_list):
+                            phrase.append(oov_list[oov_idx])
+                        else:
+                            phrase.append(UNK_WORD)
 
                 if delimiter is not None:
                     phrase = delimiter.join(phrase)
