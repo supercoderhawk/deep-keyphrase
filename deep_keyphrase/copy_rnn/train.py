@@ -52,9 +52,45 @@ class CopyRnnTrainer(BaseTrainer):
     def train_batch(self, batch):
         loss = 0
         self.optimizer.zero_grad()
-        targets = batch[TARGET]
         if torch.cuda.is_available():
-            targets = targets.cuda()
+            batch[TARGET] = batch[TARGET].cuda()
+        targets = batch[TARGET]
+        if self.args.auto_regressive:
+            loss = self.get_auto_regressive_loss(batch, loss, targets)
+        else:
+            loss = self.get_one_pass_loss(batch, targets)
+
+        loss.backward()
+
+        # clip norm, this is very import for avoiding nan gradient and misconvergence
+        if self.args.max_grad:
+            torch.nn.utils.clip_grad_value_(self.model.parameters(), self.args.max_grad)
+        if self.args.grad_norm:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_norm)
+
+        self.optimizer.step()
+        if self.args.schedule_lr:
+            self.scheduler.step()
+        return loss
+
+    def get_one_pass_loss(self, batch, targets):
+        batch_size = len(batch)
+        encoder_output = None
+        decoder_state = torch.zeros(batch_size, self.args.target_hidden_size)
+        hidden_state = None
+        prev_output_tokens = None
+        output = self.model(src_dict=batch,
+                            prev_output_tokens=prev_output_tokens,
+                            encoder_output_dict=encoder_output,
+                            prev_decoder_state=decoder_state,
+                            prev_hidden_state=hidden_state)
+        decoder_prob, encoder_output, decoder_state, hidden_state = output
+        vocab_size = decoder_prob.size(-1)
+        decoder_prob = decoder_prob.view(-1, vocab_size)
+        loss = self.loss_func(decoder_prob, targets[:, 1:].flatten())
+        return loss
+
+    def get_auto_regressive_loss(self, batch, loss, targets):
         batch_size = len(batch[TOKENS])
         encoder_output = None
         decoder_state = torch.zeros(batch_size, self.args.target_hidden_size)
@@ -68,27 +104,16 @@ class CopyRnnTrainer(BaseTrainer):
                     prev_output_tokens = targets[:, target_index].unsqueeze(1)
                 else:
                     best_probs, prev_output_tokens = torch.topk(decoder_prob, 1, 1)
-
+            prev_output_tokens = prev_output_tokens.clone()
             output = self.model(src_dict=batch,
                                 prev_output_tokens=prev_output_tokens,
                                 encoder_output_dict=encoder_output,
                                 prev_decoder_state=decoder_state,
                                 prev_hidden_state=hidden_state)
             decoder_prob, encoder_output, decoder_state, hidden_state = output
-            true_indices = targets[:, target_index + 1]
+            true_indices = targets[:, target_index + 1].clone()
             loss += self.loss_func(decoder_prob, true_indices)
-
-        loss.backward()
-
-        # clip norm, this is very import for avoiding nan gradient and misconvergence
-        if self.args.max_grad:
-            torch.nn.utils.clip_grad_value_(self.model.parameters(), self.args.max_grad)
-        if self.args.grad_norm:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_norm)
-
-        self.optimizer.step()
-        if self.args.schedule_lr:
-            self.scheduler.step()
+        loss /= self.args.max_target_len
         return loss
 
     def evaluate(self, step):
@@ -162,14 +187,15 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument("-train_from", default='', type=str, help='')
         parser.add_argument("-token_field", default='tokens', type=str, help='')
         parser.add_argument("-keyphrase_field", default='keyphrases', type=str, help='')
+        parser.add_argument("-auto_regressive", action='store_true', help='')
         parser.add_argument("-epochs", type=int, default=10, help='')
         parser.add_argument("-batch_size", type=int, default=64, help='')
         parser.add_argument("-learning_rate", type=float, default=1e-4, help='')
         parser.add_argument("-eval_batch_size", type=int, default=50, help='')
-        parser.add_argument("-dropout", type=float, default=0.1, help='')
+        parser.add_argument("-dropout", type=float, default=0.0, help='')
         parser.add_argument("-grad_norm", type=float, default=0.0, help='')
         parser.add_argument("-max_grad", type=float, default=5.0, help='')
-        parser.add_argument("-shuffle_in_batch", action='store_true', help='')
+        parser.add_argument("-shuffle", action='store_true', help='')
         parser.add_argument("-teacher_forcing", action='store_true', help='')
         parser.add_argument("-beam_size", type=float, default=50, help='')
         parser.add_argument('-tensorboard_dir', type=str, default='', help='')
@@ -192,6 +218,8 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument("-target_hidden_size", type=int, default=100, help='')
         parser.add_argument('-src_num_layers', type=int, default=1, help='')
         parser.add_argument('-target_num_layers', type=int, default=1, help='')
+        parser.add_argument("-attention_mode", type=str, default='general',
+                            choices=['general', 'dot', 'concat'], help='')
         parser.add_argument("-bidirectional", action='store_true', help='')
         parser.add_argument("-copy_net", action='store_true', help='')
         parser.add_argument("-input_feeding", action='store_true', help='')
