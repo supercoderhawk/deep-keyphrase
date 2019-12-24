@@ -280,7 +280,7 @@ class CopyRnnDecoder(nn.Module):
         rnn_output, rnn_state = self.lstm(decoder_input, encoder_hidden_state)
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
 
-        generate_logits = self.generate_proj(attn_output)
+        generate_logits = torch.exp(self.generate_proj(attn_output))
         generate_oov_logits = torch.zeros(batch_size, dec_len, self.max_oov_count)
         if torch.cuda.is_available():
             generate_oov_logits = generate_oov_logits.cuda()
@@ -294,7 +294,7 @@ class CopyRnnDecoder(nn.Module):
         # must add the generative and copy logits after exp func , so tf.log_softmax can't be called
         # because it will add the generative and copy logits before exp func, then it's equal to multiply
         # the exp(generative) and exp(copy) result, not the sum of them.
-        total_logit = torch.exp(generate_logits) + copy_logits
+        total_logit = generate_logits + copy_logits
         total_prob = total_logit / torch.sum(total_logit, 2).unsqueeze(2)
         total_prob = torch.log(total_prob)
         return total_prob, attn_output, rnn_state
@@ -343,7 +343,7 @@ class CopyRnnDecoder(nn.Module):
         # attn_output is the final hidden state of decoder layer
         # attn_output B x 1 x TH
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
-        generate_logits = self.generate_proj(attn_output).squeeze(1)
+        generate_logits = torch.exp(self.generate_proj(attn_output).squeeze(1))
         generate_oov_logits = torch.zeros(batch_size, self.max_oov_count)
         if torch.cuda.is_available():
             generate_oov_logits = generate_oov_logits.cuda()
@@ -357,7 +357,7 @@ class CopyRnnDecoder(nn.Module):
         # must add the generative and copy logits after exp func , so tf.log_softmax can't be called
         # because it will add the generative and copy logits before exp func, then it's equal to multiply
         # the exp(generative) and exp(copy) result, not the sum of them.
-        total_logit = torch.exp(generate_logits) + copy_logits.squeeze(1)
+        total_logit = generate_logits + copy_logits.squeeze(1)
         total_prob = total_logit / torch.sum(total_logit, 1).unsqueeze(1)
         total_prob = torch.log(total_prob)
         return total_prob, attn_output.squeeze(1), rnn_state
