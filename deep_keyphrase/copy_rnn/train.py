@@ -49,7 +49,8 @@ class CopyRnnTrainer(BaseTrainer):
 
         return model
 
-    def train_batch(self, batch):
+    def train_batch(self, batch, step):
+        self.model.train()
         loss = 0
         self.optimizer.zero_grad()
         if torch.cuda.is_available():
@@ -122,57 +123,33 @@ class CopyRnnTrainer(BaseTrainer):
                                      beam_size=self.args.beam_size,
                                      max_target_len=self.args.max_target_len,
                                      max_src_length=self.args.max_src_len)
-        pred_valid_filename = self.dest_dir + self.get_basename(self.args.valid_filename)
-        pred_valid_filename += '.batch_{}.pred.jsonl'.format(step)
+
+        def pred_callback(stage):
+            if stage == 'valid':
+                src_filename = self.args.valid_filename
+                dest_filename = self.dest_dir + self.get_basename(self.args.valid_filename)
+            elif stage == 'test':
+                src_filename = self.args.test_filename
+                dest_filename = self.dest_dir + self.get_basename(self.args.test_filename)
+            else:
+                raise ValueError('stage name error, must be in `valid` and `test`')
+
+            def predict_func():
+                predictor.eval_predict(src_filename=src_filename,
+                                       dest_filename=dest_filename,
+                                       args=self.args,
+                                       model=self.model,
+                                       remove_existed=True)
+
+            return predict_func
+
+        valid_statistics = self.evaluate_stage(step, 'valid', pred_callback('valid'))
+        test_statistics = self.evaluate_stage(step, 'test', pred_callback('test'))
+        total_statistics = {**valid_statistics, **test_statistics}
+
         eval_filename = self.dest_dir + self.args.exp_name + '.batch_{}.eval.json'.format(step)
-        predictor.eval_predict(src_filename=self.args.valid_filename,
-                               dest_filename=pred_valid_filename,
-                               args=self.args,
-                               model=self.model,
-                               remove_existed=True)
-        valid_macro_all_ret = self.macro_evaluator.evaluate(pred_valid_filename)
-        valid_macro_present_ret = self.macro_evaluator.evaluate(pred_valid_filename, 'present')
-        valid_macro_absent_ret = self.macro_evaluator.evaluate(pred_valid_filename, 'absent')
-
-        for n, counter in valid_macro_all_ret.items():
-            for k, v in counter.items():
-                name = 'valid/macro_{}@{}'.format(k, n)
-                self.writer.add_scalar(name, v, step)
-        for n in self.eval_topn:
-            name = 'present/valid macro_f1@{}'.format(n)
-            self.writer.add_scalar(name, valid_macro_present_ret[n]['f1'], step)
-        for n in self.eval_topn:
-            name = 'absent/valid macro_f1@{}'.format(n)
-            self.writer.add_scalar(name, valid_macro_absent_ret[n]['f1'], step)
-        pred_test_filename = self.dest_dir + self.get_basename(self.args.test_filename)
-        pred_test_filename += '.batch_{}.pred.jsonl'.format(step)
-
-        predictor.eval_predict(src_filename=self.args.test_filename,
-                               dest_filename=pred_test_filename,
-                               args=self.args,
-                               model=self.model,
-                               remove_existed=True)
-        test_macro_all_ret = self.macro_evaluator.evaluate(pred_test_filename)
-        test_macro_present_ret = self.macro_evaluator.evaluate(pred_test_filename, 'present')
-        test_macro_absent_ret = self.macro_evaluator.evaluate(pred_test_filename, 'absent')
-        for n, counter in test_macro_all_ret.items():
-            for k, v in counter.items():
-                name = 'test/macro_{}@{}'.format(k, n)
-                self.writer.add_scalar(name, v, step)
-        for n in self.eval_topn:
-            name = 'present/test macro_f1@{}'.format(n)
-            self.writer.add_scalar(name, test_macro_present_ret[n]['f1'], step)
-        for n in self.eval_topn:
-            name = 'absent/test macro_f1@{}'.format(n)
-            self.writer.add_scalar(name, test_macro_absent_ret[n]['f1'], step)
-        total_statistics = {'valid_macro': valid_macro_all_ret,
-                            'valid_present_macro': valid_macro_present_ret,
-                            'valid_absent_macro': valid_macro_absent_ret,
-                            'test_macro': test_macro_all_ret,
-                            'test_present_macro': test_macro_present_ret,
-                            'test_absent_macro': test_macro_absent_ret}
         write_json(eval_filename, total_statistics)
-        return valid_macro_all_ret[self.eval_topn[-1]]['f1']
+        return valid_statistics['valid_macro'][self.eval_topn[-1]]['f1']
 
     def parse_args(self, args=None):
         parser = argparse.ArgumentParser()

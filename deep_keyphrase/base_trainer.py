@@ -54,13 +54,15 @@ class BaseTrainer(object):
             tensorboard_dir = self.args.tensorboard_dir
         self.writer = SummaryWriter(tensorboard_dir)
         self.eval_topn = (5, 10)
-        self.macro_evaluator = KeyphraseEvaluator(self.eval_topn, 'macro')
-        self.micro_evaluator = KeyphraseEvaluator(self.eval_topn, 'micro')
+        self.macro_evaluator = KeyphraseEvaluator(self.eval_topn, 'macro',
+                                                  args.token_field, args.keyphrase_field)
+        self.micro_evaluator = KeyphraseEvaluator(self.eval_topn, 'micro',
+                                                  args.token_field, args.keyphrase_field)
         self.best_f1 = None
         self.best_step = 0
         self.not_update_count = 0
 
-    def parse_args(self):
+    def parse_args(self, args=None):
         raise NotImplementedError('build_parser is not implemented')
 
     def train(self):
@@ -73,10 +75,10 @@ class BaseTrainer(object):
         else:
             self.logger.info('destination dir:{}'.format(self.dest_dir))
         for epoch in range(1, self.args.epochs + 1):
+            self.model.train()
             for batch_idx, batch in enumerate(self.train_loader):
-                self.model.train()
                 try:
-                    loss = self.train_batch(batch)
+                    loss = self.train_batch(batch, step)
                 except Exception as e:
                     err_stack = traceback.format_exc()
                     self.logger.error(err_stack)
@@ -87,6 +89,7 @@ class BaseTrainer(object):
                 if step and step % self.args.save_model_step == 0:
                     torch.cuda.empty_cache()
                     self.evaluate_and_save_model(step, epoch)
+                    torch.cuda.empty_cache()
                     if self.not_update_count >= self.args.early_stop_tolerance:
                         is_stop = True
                         break
@@ -94,8 +97,37 @@ class BaseTrainer(object):
                 self.logger.info('best step {}'.format(self.best_step))
                 break
 
-    def train_batch(self, batch):
+    def train_batch(self, batch, step):
         raise NotImplementedError('train method is not implemented')
+
+    def evaluate_stage(self, step, stage, predict_callback):
+        if stage == 'valid':
+            src_filename = self.args.valid_filename
+        elif stage == 'test':
+            src_filename = self.args.test_filename
+        else:
+            raise ValueError('stage name error, must be in `valid` and `test`')
+        pred_filename = self.dest_dir + self.get_basename(src_filename)
+        pred_filename += '.batch_{}.pred.jsonl'.format(step)
+        predict_callback()
+        macro_all_ret = self.macro_evaluator.evaluate(pred_filename)
+        macro_present_ret = self.macro_evaluator.evaluate(pred_filename, 'present')
+        macro_absent_ret = self.macro_evaluator.evaluate(pred_filename, 'absent')
+
+        for n, counter in macro_all_ret.items():
+            for k, v in counter.items():
+                name = '{}/macro_{}@{}'.format(stage, k, n)
+                self.writer.add_scalar(name, v, step)
+        for n in self.eval_topn:
+            name = 'present/{} macro_f1@{}'.format(stage, n)
+            self.writer.add_scalar(name, macro_present_ret[n]['f1'], step)
+        for n in self.eval_topn:
+            name = 'absent/{} macro_f1@{}'.format(stage, n)
+            self.writer.add_scalar(name, macro_absent_ret[n]['f1'], step)
+        statistics = {'{}_macro'.format(stage): macro_all_ret,
+                      '{}_macro_present'.format(stage): macro_present_ret,
+                      '{}_macro_absent'.format(stage): macro_absent_ret}
+        return statistics
 
     def evaluate_and_save_model(self, step, epoch):
         valid_f1 = self.evaluate(step)
