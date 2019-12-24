@@ -59,11 +59,19 @@ download the kp20k_
 
 ::
 
+    mkdir data
+    mkdir data/raw
     mkdir data/raw/kp20k_new
-    # unzip kp20k data put the  into above folder
+    # unzip kp20k data put the files into above folder
+    python -m nltk.downloader punkt
     bash scripts/prepare_kp20k.sh
     bash scripts/train_copyrnn_kp20k.sh
 
+    # start tensorboard
+    # enter the experiment result dir, suffix is time that experiment starts
+    cd data/kp20k/copyrnn_kp20k_basic-20191212-080000
+    # start tensorboard services
+    tenosrboard --bind_all --logdir logs --port 6006
 
 Notes
 =============================
@@ -73,3 +81,4 @@ Notes
         2. train and inference are not correspond (training doesn\'t have input feeding and inference has input feeding)
     2. easy data preparing
     3. tensorboard support
+    4. **faster beam search (6x faster used cpu and more than 10x faster used gpu)**
