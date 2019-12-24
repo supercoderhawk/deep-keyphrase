@@ -63,6 +63,7 @@ class CopyRnnPredictor(BasePredictor):
         :param tokenized:
         :return:
         """
+        # eval mode closes dropout, triggers auto regression in decoding stage
         self.model.eval()
         if len(text_list) < batch_size:
             batch_size = len(text_list)
