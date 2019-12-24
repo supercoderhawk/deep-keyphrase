@@ -4,6 +4,7 @@ from .constants import DIGIT_WORD
 
 num_regex = re.compile(r'\d+([.]\d+)?')
 
+# '1.' => ['<digit>', '.'], '1.1' => ['<digit>']
 char_regex = re.compile(r'[_\-—<>{,(?\\.\'%]|\d+([.]\d+)?', re.IGNORECASE)
 
 
