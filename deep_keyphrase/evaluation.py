@@ -2,7 +2,7 @@
 import copy
 from operator import itemgetter
 from collections import OrderedDict
-from pysenal import read_jsonline_lazy, read_json
+from pysenal import read_jsonline, read_json
 
 
 class KeyphraseEvaluator(object):
@@ -21,8 +21,8 @@ class KeyphraseEvaluator(object):
         if isinstance(input_data, str):
             if input_data.endswith('.json'):
                 data_source = read_json(input_data)
-            elif input_data.endswith('jsonl'):
-                data_source = read_jsonline_lazy(input_data)
+            elif input_data.endswith('.jsonl'):
+                data_source = read_jsonline(input_data)
             else:
                 raise ValueError('input file type is not supported, only support .json and .jsonl')
         elif isinstance(input_data, list):
