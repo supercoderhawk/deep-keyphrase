@@ -8,11 +8,11 @@ VOCAB_PATH=$DATA_DIR/vocab_kp20k.txt
 DEST_DIR=$DATA_DIR/kp20k/
 EXP_NAME=copyrnn_kp20k_basic
 
-#export CUDA_VISIBLE_DEVICES=1
+# export CUDA_VISIBLE_DEVICES=1
 
 python3 deep_keyphrase/copy_rnn/train.py -exp_name $EXP_NAME \
   -train_filename $TRAIN_FILENAME \
   -valid_filename $VALID_FILENAME -test_filename $TEST_FILENAME \
-  -token_field abstract_tokens -keyphrase_field keyword_tokens \
+  -token_field title_and_abstract_tokens -keyphrase_field keyword_tokens \
   -vocab_path $VOCAB_PATH -dest_base_dir $DEST_DIR \
-  -bidirectional -teacher_forcing -copy_net
+  -bidirectional -teacher_forcing -copy_net -shuffle -prefetch
