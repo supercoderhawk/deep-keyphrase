@@ -62,7 +62,7 @@ download the kp20k_
     mkdir data
     mkdir data/raw
     mkdir data/raw/kp20k_new
-    # unzip kp20k data put the files into above folder
+    # !! please unzip kp20k data put the files into above folder manually
     python -m nltk.downloader punkt
     bash scripts/prepare_kp20k.sh
     bash scripts/train_copyrnn_kp20k.sh
