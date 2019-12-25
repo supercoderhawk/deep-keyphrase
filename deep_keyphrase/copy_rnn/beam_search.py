@@ -108,8 +108,9 @@ class BeamSearch(object):
 
     def __idx2result_beam(self, delimiter, oov_list, result_sequences):
         results = []
-        for batch in result_sequences:
+        for batch_idx, batch in enumerate(result_sequences):
             beam_list = []
+            item_oov_list = oov_list[batch_idx]
             for beam in batch:
                 phrase = []
                 for idx in beam:
@@ -119,8 +120,8 @@ class BeamSearch(object):
                         phrase.append(self.id2vocab[idx])
                     else:
                         oov_idx = idx - len(self.id2vocab)
-                        if oov_idx < len(oov_list):
-                            phrase.append(oov_list[oov_idx])
+                        if oov_idx < len(item_oov_list):
+                            phrase.append(item_oov_list[oov_idx])
                         else:
                             phrase.append(UNK_WORD)
 
@@ -188,12 +189,16 @@ class BeamSearch(object):
         for batch in result_seqs.numpy().tolist():
             phrase = []
             for idx in batch:
-                if self.id2vocab[idx] == EOS_WORD:
+                if self.id2vocab.get(idx) == EOS_WORD:
                     break
                 if idx in self.id2vocab:
                     phrase.append(self.id2vocab[idx])
                 else:
-                    phrase.append(oov_list[idx - len(self.id2vocab)])
+                    oov_idx = idx - len(self.id2vocab)
+                    if oov_idx < len(oov_list):
+                        phrase.append(oov_list[oov_idx])
+                    else:
+                        phrase.append(UNK_WORD)
             if delimiter is not None:
                 phrase = delimiter.join(phrase)
             result.append(phrase)

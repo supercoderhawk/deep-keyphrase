@@ -2,6 +2,14 @@
 Changelog
 =========
 
+Version 0.0.5
+==================
+* fix beam search exception in CopyRNN
+
+Version 0.0.4
+==================
+* fix beam search exception in CopyRNN
+
 Version 0.0.3
 ==================
 
