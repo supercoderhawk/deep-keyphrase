@@ -133,7 +133,7 @@ class CopyRnnTrainer(BaseTrainer):
                 dest_filename = self.dest_dir + self.get_basename(self.args.test_filename)
             else:
                 raise ValueError('stage name error, must be in `valid` and `test`')
-
+            dest_filename += '.batch_{}.pred.jsonl'.format(step)
             def predict_func():
                 predictor.eval_predict(src_filename=src_filename,
                                        dest_filename=dest_filename,
