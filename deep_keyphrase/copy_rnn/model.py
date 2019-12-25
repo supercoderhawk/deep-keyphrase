@@ -281,7 +281,7 @@ class CopyRnnDecoder(nn.Module):
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
 
         generate_logits = torch.exp(self.generate_proj(attn_output))
-        generate_oov_logits = torch.zeros(batch_size, dec_len, self.max_oov_count)
+        generate_oov_logits = torch.zeros(batch_size, dec_len, self.max_oov_count) + 1e-10
         if torch.cuda.is_available():
             generate_oov_logits = generate_oov_logits.cuda()
         generate_logits = torch.cat([generate_logits, generate_oov_logits], dim=2)
@@ -344,7 +344,7 @@ class CopyRnnDecoder(nn.Module):
         # attn_output B x 1 x TH
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
         generate_logits = torch.exp(self.generate_proj(attn_output).squeeze(1))
-        generate_oov_logits = torch.zeros(batch_size, self.max_oov_count)
+        generate_oov_logits = torch.zeros(batch_size, self.max_oov_count) + 1e-10
         if torch.cuda.is_available():
             generate_oov_logits = generate_oov_logits.cuda()
         generate_logits = torch.cat([generate_logits, generate_oov_logits], dim=1)
@@ -417,7 +417,7 @@ class CopyRnnDecoder(nn.Module):
         batch_size = len(encoder_out)
         # copy_score: B x L x dec_len
         copy_score_in_seq = torch.bmm(torch.tanh(self.copy_proj(encoder_out)),
-                                      decoder_output.permute(0, 2, 1))  # .squeeze(2)
+                                      decoder_output.permute(0, 2, 1))
         copy_score_mask = encoder_output_mask.unsqueeze(2).repeat(1, 1, dec_len)
         copy_score_in_seq.masked_fill_(copy_score_mask, float('-inf'))
         copy_score_in_seq = torch.exp(copy_score_in_seq)
