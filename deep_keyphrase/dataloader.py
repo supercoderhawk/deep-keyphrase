@@ -72,7 +72,7 @@ class KeyphraseDataLoader(object):
                         token_ids_with_oov.append(self.vocab_size + self.max_oov_count - 1)
                     else:
                         token_ids_with_oov.append(self.vocab_size + len(oov_list))
-                        oov_list.append(oov_list)
+                        oov_list.append(token)
                 else:
                     token_ids_with_oov.append(self.vocab_size + oov_list.index(token))
             else:
