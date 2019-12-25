@@ -14,7 +14,7 @@ class TransformerBeamSearch(object):
         self.bidirectional = args.bidirectional
         self.input_dim = args.input_dim
 
-    def beam_search(self, src_dict, delimiter=''):
+    def beam_search(self, src_dict, delimiter=None):
         batch_size = len(src_dict[TOKENS])
         beam_batch_size = batch_size * self.beam_size
         encoder_output = encoder_mask = None
@@ -87,7 +87,7 @@ class TransformerBeamSearch(object):
         t = t.reshape(size)
         return t
 
-    def greedy_search(self, src_dict, delimiter=''):
+    def greedy_search(self, src_dict, delimiter=None):
         batch_size = len(src_dict[TOKENS])
         encoder_output = encoder_mask = None
         prev_copy_state = None

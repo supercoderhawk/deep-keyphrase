@@ -4,7 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules.transformer import (TransformerEncoder, TransformerDecoder,
                                           TransformerEncoderLayer, TransformerDecoderLayer)
-from deep_keyphrase.dataloader import TOKENS, TOKENS_LENS, TOKENS_OOV, UNK_WORD, PAD_WORD, OOV_COUNT
+from deep_keyphrase.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
+                                       UNK_WORD, PAD_WORD, OOV_COUNT, TARGET)
 
 
 def get_position_encoding(input_tensor):
@@ -34,14 +35,8 @@ class CopyTransformer(nn.Module):
                                               dropout=args.src_dropout,
                                               num_layers=args.src_layers)
         self.decoder = CopyTransformerDecoder(embedding=embedding,
-                                              input_dim=args.input_dim,
-                                              head_size=args.target_head_size,
-                                              feed_forward_dim=args.feed_forward_dim,
-                                              dropout=args.target_dropout,
-                                              num_layers=args.target_layers,
-                                              target_max_len=args.max_target_len,
                                               vocab2id=vocab2id,
-                                              max_oov_count=args.max_oov_count)
+                                              args=args)
 
     def forward(self, src_dict, prev_output_tokens, encoder_output, encoder_mask,
                 prev_decoder_state, position, prev_copy_state):
@@ -93,27 +88,69 @@ class CopyTransformerEncoder(nn.Module):
 
 
 class CopyTransformerDecoder(nn.Module):
-    def __init__(self, embedding, input_dim, vocab2id, head_size, feed_forward_dim,
-                 dropout, num_layers, target_max_len, max_oov_count):
+    def __init__(self, embedding, vocab2id, args):
         super().__init__()
         self.embedding = embedding
-        self.dropout = dropout
-        self.vocab_size = embedding.num_embeddings
         self.vocab2id = vocab2id
-        layer = TransformerDecoderLayer(d_model=input_dim,
-                                        nhead=head_size,
-                                        dim_feedforward=feed_forward_dim,
-                                        dropout=dropout)
-        self.decoder = TransformerDecoder(decoder_layer=layer, num_layers=num_layers)
-        self.input_copy_proj = nn.Linear(input_dim, input_dim, bias=False)
-        self.copy_proj = nn.Linear(input_dim, input_dim, bias=False)
-        self.embed_proj = nn.Linear(2 * input_dim, input_dim, bias=False)
-        self.generate_proj = nn.Linear(input_dim, self.vocab_size, bias=False)
-        self.input_dim = input_dim
-        self.target_max_len = target_max_len
-        self.max_oov_count = max_oov_count
+        self.args = args
+        self.input_dim = args.input_dim
+        self.head_size = args.target_head_size
+        self.feed_forward_dim = args.feed_forward_dim
+        self.dropout = args.target_dropout
+        self.num_layers = args.target_layers
+        self.target_max_len = args.max_target_len
+        self.max_oov_count = args.max_oov_count
+        self.vocab_size = embedding.num_embeddings
+
+        layer = TransformerDecoderLayer(d_model=self.input_dim,
+                                        nhead=self.head_size,
+                                        dim_feedforward=self.feed_forward_dim,
+                                        dropout=self.dropout)
+        self.decoder = TransformerDecoder(decoder_layer=layer, num_layers=self.num_layers)
+        self.input_copy_proj = nn.Linear(self.input_dim, self.input_dim, bias=False)
+        self.copy_proj = nn.Linear(self.input_dim, self.input_dim, bias=False)
+        self.embed_proj = nn.Linear(2 * self.input_dim, self.input_dim, bias=False)
+        self.generate_proj = nn.Linear(self.input_dim, self.vocab_size, bias=False)
 
     def forward(self, prev_output_tokens, prev_decoder_state, position,
+                encoder_output, encoder_mask, src_dict, prev_copy_state):
+        if self.args.input_feeding and not self.training:
+            output = self.forward_auto_regressive(prev_output_tokens, prev_decoder_state, position,
+                                                  encoder_output, encoder_mask, src_dict, prev_copy_state)
+        else:
+            output = self.forward_one_pass(encoder_output, encoder_mask, src_dict)
+        return output
+
+    def forward_one_pass(self, encoder_output, encoder_mask, src_dict):
+        batch_size = len(src_dict[TOKENS])
+        token_embed = self.embedding(src_dict[TARGET][:, :-1])
+        src_tokens_with_oov = src_dict[TOKENS_OOV]
+        pos_embed = get_position_encoding(token_embed)
+        # B x seq_len x H
+        src_embed = token_embed + pos_embed
+        decoder_input = F.dropout(src_embed, p=self.dropout, training=self.training)
+        decoder_input_mask = torch.triu(torch.ones(self.input_dim, self.input_dim), 1)
+        decoder_output = self.decoder(tgt=decoder_input,
+                                      memory=encoder_output.transpose(1, 0),
+                                      memory_key_padding_mask=decoder_input_mask)
+        # B x seq_len x H
+        decoder_output = decoder_output.transpose(1, 0)
+        generation_logits = torch.exp(self.generate_proj(decoder_output).squeeze(1))
+        generation_oov_logits = torch.zeros(batch_size, self.max_oov_count)
+        if torch.cuda.is_available():
+            generation_oov_logits = generation_oov_logits.cuda()
+        generation_logits = torch.cat([generation_logits, generation_oov_logits], dim=1)
+        copy_logits = self.get_copy_score(encoder_output,
+                                          src_tokens_with_oov,
+                                          decoder_output,
+                                          encoder_mask)
+        total_logit = generation_logits + copy_logits
+        total_prob = total_logit / torch.sum(total_logit, 1).unsqueeze(1)
+        total_prob = torch.log(total_prob)
+
+        return total_prob, decoder_output.squeeze(1), None, encoder_output, encoder_mask
+
+    def forward_auto_regressive(self, prev_output_tokens, prev_decoder_state, position,
                 encoder_output, encoder_mask, src_dict, prev_copy_state):
         src_tokens = src_dict[TOKENS]
         src_tokens_with_oov = src_dict[TOKENS_OOV]
@@ -188,13 +225,29 @@ class CopyTransformerDecoder(nn.Module):
         return copy_state
 
     def get_copy_score(self, encoder_out, src_tokens_with_oov, decoder_output, encoder_output_mask):
+        """
+
+        :param encoder_out: B x L x SH
+        :param src_tokens_with_oov: B x L
+        :param decoder_output: B x dec_len x TH
+        :param encoder_output_mask: B x L
+        :return: B x dec_len x V
+        """
         # copy_score: B x L
+        dec_len = decoder_output.size(1)
+        batch_size = len(encoder_out)
+        # copy_score: B x L x dec_len
         copy_score_in_seq = torch.bmm(torch.tanh(self.copy_proj(encoder_out)),
-                                      decoder_output.permute(0, 2, 1)).squeeze(2)
-        copy_score_in_seq.masked_fill_(encoder_output_mask, float('-inf'))
+                                      decoder_output.permute(0, 2, 1))
+        copy_score_mask = encoder_output_mask.unsqueeze(2).repeat(1, 1, dec_len)
+        copy_score_in_seq.masked_fill_(copy_score_mask, float('-inf'))
         copy_score_in_seq = torch.exp(copy_score_in_seq)
-        copy_score_in_vocab = torch.zeros(len(encoder_out), self.vocab_size + self.max_oov_count)
+        total_vocab_size = self.vocab_size + self.max_oov_count
+        copy_score_in_vocab = torch.zeros(batch_size, total_vocab_size, dec_len)
         if torch.cuda.is_available():
             copy_score_in_vocab = copy_score_in_vocab.cuda()
-        copy_score_in_vocab.scatter_add_(1, src_tokens_with_oov, copy_score_in_seq)
+        token_ids = src_tokens_with_oov.unsqueeze(2).repeat(1, 1, dec_len)
+        copy_score_in_vocab.scatter_add_(1, token_ids, copy_score_in_seq)
+        copy_score_in_vocab = copy_score_in_vocab.permute(0, 2, 1)
+
         return copy_score_in_vocab

@@ -2,6 +2,7 @@
 import os
 import torch
 from pysenal import append_jsonlines
+from munch import Munch
 from deep_keyphrase.base_predictor import BasePredictor
 from deep_keyphrase.dataloader import KeyphraseDataLoader, TOKENS, RAW_BATCH
 from deep_keyphrase.utils.constants import BOS_WORD
@@ -33,18 +34,19 @@ class CopyTransformerPredictor(BasePredictor):
                                                    id2vocab=self.id2vocab,
                                                    bos_idx=self.vocab2id[BOS_WORD],
                                                    args=self.config)
+        self.pred_base_config = {'max_oov_count': self.config.max_oov_count,
+                                 'max_src_len': self.max_src_len,
+                                 'max_target_len': self.max_target_len}
 
     def predict(self, text_list, batch_size, delimiter=None):
         self.model.eval()
         if len(text_list) < batch_size:
             batch_size = len(text_list)
+        args = Munch({'batch_size': batch_size, **self.pred_base_config})
         text_list = [{TOKENS: token_char_tokenize(i)} for i in text_list]
         loader = KeyphraseDataLoader(data_source=text_list,
                                      vocab2id=self.vocab2id,
-                                     batch_size=batch_size,
-                                     max_oov_count=self.config.max_oov_count,
-                                     max_src_len=self.max_src_len,
-                                     max_target_len=self.max_target_len,
+                                     args=args,
                                      mode='inference')
         result = []
         for batch in loader:
@@ -52,19 +54,15 @@ class CopyTransformerPredictor(BasePredictor):
                 result.extend(self.beam_searcher.beam_search(batch, delimiter=delimiter))
         return result
 
-    def eval_predict(self, src_filename, dest_filename, batch_size,
-                     model=None, remove_existed=False,
-                     token_field='tokens', keyphrase_field='keyphrases'):
+    def eval_predict(self, src_filename, dest_filename, args,
+                     model=None, remove_existed=False):
+        args_dict = vars(args)
+        args_dict['batch_size'] = args_dict['eval_batch_size']
+        args = Munch(args_dict)
         loader = KeyphraseDataLoader(data_source=src_filename,
                                      vocab2id=self.vocab2id,
-                                     batch_size=batch_size,
-                                     max_oov_count=self.config.max_oov_count,
-                                     max_src_len=self.max_src_len,
-                                     max_target_len=self.max_target_len,
                                      mode='inference',
-                                     pre_fetch=True,
-                                     token_field=token_field,
-                                     keyphrase_field=keyphrase_field)
+                                     args=args)
         if os.path.exists(dest_filename):
             print('destination filename {} existed'.format(dest_filename))
             if remove_existed:
