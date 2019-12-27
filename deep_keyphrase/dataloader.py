@@ -103,7 +103,7 @@ class KeyphraseDataIterator(object):
         self.num_workers = multiprocessing.cpu_count() // 2 or 1
 
         if self.loader.mode == TRAIN_MODE:
-            self.chunk_size = self.num_workers * 100
+            self.chunk_size = self.batch_size * 5
         else:
             self.chunk_size = self.batch_size
         self._data = self.load_data(self.chunk_size)
@@ -115,12 +115,9 @@ class KeyphraseDataIterator(object):
         if self.loader.mode in {TRAIN_MODE, EVAL_MODE}:
             self.input_queue = multiprocessing.Queue(-1)
             self.output_queue = multiprocessing.Queue(-1)
-            self.done_event = multiprocessing.Event()
             self.__prefetch()
             for _ in range(self.num_workers):
-                worker = multiprocessing.Process(
-                    target=self._data_worker_loop
-                )
+                worker = multiprocessing.Process(target=self._data_worker_loop)
                 self.workers.append(worker)
             for worker in self.workers:
                 worker.daemon = True
@@ -145,9 +142,6 @@ class KeyphraseDataIterator(object):
 
     def _data_worker_loop(self):
         while True:
-            if self.done_event.is_set():
-                break
-
             raw_batch = self.input_queue.get()
 
             # exit signal
@@ -338,15 +332,15 @@ class KeyphraseDataIterator(object):
         return new_batch
 
     def _shutdown_workers(self):
-        if not self.worker_shutdown and self.loader.mode in {TRAIN_MODE}:
-            self.worker_shutdown = True
-            self.done_event.set()
+        if not self.workers:
+            return
 
-            self.input_queue.close()
-            self.output_queue.close()
+        self.input_queue.close()
+        self.output_queue.close()
 
-            for worker in self.workers:
-                worker.terminate()
+        for worker in self.workers:
+            worker.terminate()
+        self.workers = []
 
     def __del__(self):
         if self.workers:
