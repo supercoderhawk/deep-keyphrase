@@ -7,6 +7,11 @@ Implement some keyphrase generation algorithm
 
 .. image:: https://img.shields.io/github/workflow/status/supercoderhawk/deep-keyphrase/ci.svg
 
+.. image:: https://img.shields.io/pypi/v/deep-keyphrase.svg
+    :target: https://pypi.org/project/deep-keyphrase
+
+.. image:: https://img.shields.io/pypi/dm/deep-keyphrase.svg
+    :target: https://pypi.org/project/pysenal
 
 
 Description
