@@ -87,7 +87,8 @@ class CopyRNN(nn.Module):
         src_hidden_size = args.src_hidden_size
         target_hidden_size = args.target_hidden_size
         embed_size = args.embed_size
-        embedding = nn.Embedding(len(vocab2id), embed_size, vocab2id[PAD_WORD])
+        embedding = nn.Embedding(len(vocab2id), embed_size, padding_idx=vocab2id[PAD_WORD])
+        nn.init.uniform_(embedding.weight, -0.1, 0.1)
         self.encoder = CopyRnnEncoder(vocab2id=vocab2id,
                                       embedding=embedding,
                                       hidden_size=src_hidden_size,
@@ -281,6 +282,7 @@ class CopyRnnDecoder(nn.Module):
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
 
         generate_logits = torch.exp(self.generate_proj(attn_output))
+        # add 1e-10 to avoid -inf in torch.log
         generate_oov_logits = torch.zeros(batch_size, dec_len, self.max_oov_count) + 1e-10
         if torch.cuda.is_available():
             generate_oov_logits = generate_oov_logits.cuda()
@@ -344,6 +346,7 @@ class CopyRnnDecoder(nn.Module):
         # attn_output B x 1 x TH
         attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
         generate_logits = torch.exp(self.generate_proj(attn_output).squeeze(1))
+        # add 1e-10 to avoid -inf in torch.log
         generate_oov_logits = torch.zeros(batch_size, self.max_oov_count) + 1e-10
         if torch.cuda.is_available():
             generate_oov_logits = generate_oov_logits.cuda()
