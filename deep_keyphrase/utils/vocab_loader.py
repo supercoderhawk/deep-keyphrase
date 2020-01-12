@@ -19,8 +19,8 @@ def load_vocab(src_filename, vocab_size=None):
         raise ValueError('begin of sentence char is not in vocab')
     if EOS_WORD not in vocab2id:
         raise ValueError('end of sentence char is not in vocab')
-    if DIGIT_WORD not in vocab2id:
-        raise ValueError('digit char is not in vocab')
-    if SEP_WORD not in vocab2id:
-        raise ValueError('separator char is not in vocab')
+    # if DIGIT_WORD not in vocab2id:
+    #     raise ValueError('digit char is not in vocab')
+    # if SEP_WORD not in vocab2id:
+    #     raise ValueError('separator char is not in vocab')
     return vocab2id
