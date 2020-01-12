@@ -66,6 +66,19 @@ class BaseTrainer(object):
         raise NotImplementedError('build_parser is not implemented')
 
     def train(self):
+        try:
+            self.train_func()
+        except KeyboardInterrupt:
+            self.logger.info('you terminate the train logic')
+        except Exception:
+            self.logger.error('exception occurred')
+            err_stack = traceback.format_exc()
+            self.logger.error(err_stack)
+        finally:
+            # terminate the loader processes
+            del self.train_loader
+
+    def train_func(self):
         step = 0
         is_stop = False
         if self.args.train_from:
