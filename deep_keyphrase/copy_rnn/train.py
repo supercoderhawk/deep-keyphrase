@@ -70,7 +70,7 @@ class CopyRnnTrainer(BaseTrainer):
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_norm)
 
         self.optimizer.step()
-        if self.args.schedule_lr:
+        if self.args.schedule_lr and step <= self.args.schedule_step:
             self.scheduler.step()
         return loss
 
@@ -181,10 +181,11 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument('-early_stop_tolerance', type=int, default=100, help='')
         parser.add_argument('-train_parallel', action='store_true', help='')
         parser.add_argument('-schedule_lr', action='store_true', help='')
-        parser.add_argument('-schedule_step', type=int, default=100000, help='')
-        parser.add_argument('-schedule_gamma', type=float, default=0.5, help='')
+        parser.add_argument('-schedule_step', type=int, default=10000, help='')
+        parser.add_argument('-schedule_gamma', type=float, default=0.1, help='')
         parser.add_argument('-processed', action='store_true', help='')
         parser.add_argument('-prefetch', action='store_true', help='')
+        parser.add_argument('-lazy_loading', action='store_true', help='')
 
         # model specific parameter
         parser.add_argument("-embed_size", type=int, default=200, help='')
