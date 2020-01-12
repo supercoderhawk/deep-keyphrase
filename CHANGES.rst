@@ -2,6 +2,12 @@
 Changelog
 =========
 
+Version 0.0.6
+====================
+* update vocab loader
+* initialize embedding of copyrnn with uniform distribution
+
+
 Version 0.0.5
 ==================
 * fix beam search exception in CopyRNN
