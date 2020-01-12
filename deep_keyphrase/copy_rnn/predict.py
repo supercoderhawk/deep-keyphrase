@@ -16,15 +16,17 @@ class CopyRnnPredictor(BasePredictor):
     def __init__(self, model_info, vocab_info, beam_size, max_target_len, max_src_length):
         """
 
-        :param model_info: define the model information.
+        :param model_info: input the model information.
                             str type: model path
                             dict type: must have `model` and `config` field,
                                         indicate the model object and config object
 
-        :param vocab_info:
-        :param beam_size:
-        :param max_target_len:
-        :param max_src_length:
+        :param vocab_info: input the vocab information.
+                            str type: vocab path
+                            dict type: vocab2id dict which map word to id
+        :param beam_size: beam size
+        :param max_target_len: max keyphrase token length
+        :param max_src_length: max source text length
         """
         super().__init__(model_info)
         if isinstance(vocab_info, str):
