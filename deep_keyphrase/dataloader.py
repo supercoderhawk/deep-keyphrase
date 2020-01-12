@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import torch
 import torch.multiprocessing as multiprocessing
-from pysenal import read_jsonline_lazy, get_chunk
+from pysenal import read_jsonline_lazy, get_chunk, read_jsonline
 from deep_keyphrase.utils.constants import *
 
 TOKENS = 'tokens'
@@ -45,6 +45,7 @@ class KeyphraseDataLoader(object):
         self.max_target_len = args.max_target_len
         self.mode = mode
         self.prefetch = args.prefetch
+        self.lazy_loading = args.lazy_loading
         self.shuffle = args.shuffle
         self.token_field = args.token_field
         self.keyphrases_field = args.keyphrase_field
@@ -100,6 +101,9 @@ class KeyphraseDataIterator(object):
         self.loader = loader
         self.data_source = loader.data_source
         self.batch_size = loader.batch_size
+        self.token_field = loader.token_field
+        self.keyphrases_field = loader.keyphrases_field
+        self.lazy_loading = loader.lazy_loading
         self.num_workers = multiprocessing.cpu_count() // 2 or 1
 
         if self.loader.mode == TRAIN_MODE:
@@ -133,7 +137,14 @@ class KeyphraseDataIterator(object):
 
     def load_data(self, chunk_size):
         if isinstance(self.data_source, str):
-            data = read_jsonline_lazy(self.data_source)
+            if self.lazy_loading:
+                data = read_jsonline_lazy(self.data_source)
+            else:
+                data = read_jsonline(self.data_source)
+                if self.loader.shuffle:
+                    random.shuffle(data)
+                    random.shuffle(data)
+                    random.shuffle(data)
         elif isinstance(self.data_source, list):
             data = iter(self.data_source)
         else:
@@ -172,7 +183,7 @@ class KeyphraseDataIterator(object):
                 item = self.loader.collate_fn(raw_item)
             else:
                 item = raw_item
-            token_len = len(item[self.loader.token_field])
+            token_len = len(item[TOKENS])
             token_len_list.append(token_len)
             token_ids = item[TOKENS] + [pad_id] * (max_src_len - token_len)
             token_ids_list.append(token_ids)
@@ -295,7 +306,7 @@ class KeyphraseDataIterator(object):
     def flatten_raw_item(self, item):
         flatten_items = []
         for phrase in item[self.loader.keyphrases_field]:
-            flatten_items.append({'tokens': item['tokens'], 'phrase': phrase})
+            flatten_items.append({self.token_field: item[self.token_field], 'phrase': phrase})
         return flatten_items
 
     def iter_inference_parallel(self):
