@@ -186,7 +186,8 @@ class BeamSearch(object):
 
     def __idx2result_greedy(self, delimiter, oov_list, result_seqs):
         result = []
-        for batch in result_seqs.numpy().tolist():
+        for batch_idx, batch in enumerate(result_seqs.numpy().tolist()):
+            item_oov_list = oov_list[batch_idx]
             phrase = []
             for idx in batch:
                 if self.id2vocab.get(idx) == EOS_WORD:
@@ -195,8 +196,8 @@ class BeamSearch(object):
                     phrase.append(self.id2vocab[idx])
                 else:
                     oov_idx = idx - len(self.id2vocab)
-                    if oov_idx < len(oov_list):
-                        phrase.append(oov_list[oov_idx])
+                    if oov_idx < len(item_oov_list):
+                        phrase.append(item_oov_list[oov_idx])
                     else:
                         phrase.append(UNK_WORD)
             if delimiter is not None:
