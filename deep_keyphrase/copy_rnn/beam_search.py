@@ -5,12 +5,14 @@ from deep_keyphrase.dataloader import (TOKENS, TOKENS_LENS, TOKENS_OOV,
 
 
 class BeamSearch(object):
-    def __init__(self, model, beam_size, max_target_len, id2vocab, bos_idx, args):
+    def __init__(self, model, beam_size, max_target_len, id2vocab, bos_idx, unk_idx, args):
         self.model = model
         self.beam_size = beam_size
         self.id2vocab = id2vocab
+        self.vocab_size = len(self.id2vocab)
         self.max_target_len = max_target_len
         self.bos_idx = bos_idx
+        self.unk_idx = unk_idx
         self.target_hidden_size = args.target_hidden_size
 
     def beam_search(self, src_dict, delimiter=None):
@@ -41,6 +43,9 @@ class BeamSearch(object):
                                   prev_hidden_state=hidden_state)
         decoder_prob, encoder_output_dict, decoder_state, hidden_state = model_output
         prev_best_probs, prev_best_index = torch.topk(decoder_prob, self.beam_size, 1)
+        # map oov token to unk
+        oov_token_mask = prev_best_index >= self.vocab_size
+        prev_best_index.masked_fill_(oov_token_mask, self.unk_idx)
         # B*b x TH
         prev_decoder_state = decoder_state.unsqueeze(1).repeat(1, self.beam_size, 1)
         prev_decoder_state = prev_decoder_state.view(beam_batch_size, -1)
@@ -88,6 +93,9 @@ class BeamSearch(object):
             prev_best_index = top_token_index % decoder_prob.size(1)
             prev_hidden_state[0] = prev_hidden_state[0].index_select(1, state_select_idx)
             prev_hidden_state[1] = prev_hidden_state[1].index_select(1, state_select_idx)
+            # map oov token to unk
+            oov_token_mask = prev_best_index >= self.vocab_size
+            prev_best_index.masked_fill_(oov_token_mask, self.unk_idx)
 
             result_sequences = result_sequences.view(batch_size * self.beam_size, -1)
             result_sequences = result_sequences.index_select(0, state_select_idx)
