@@ -256,10 +256,15 @@ class CopyRnnDecoder(nn.Module):
                                                        src_dict=src_dict,
                                                        encoder_hidden_state=prev_rnn_state)
         else:
-            output = self.forward_rnn(encoder_output_dict=encoder_output_dict,
-                                      prev_output_tokens=prev_output_tokens,
-                                      prev_rnn_state=prev_rnn_state,
-                                      prev_context_state=prev_context_state)
+            if self.auto_regressive or not self.training:
+                output = self.forward_rnn_auto_regressive(encoder_output_dict=encoder_output_dict,
+                                                          prev_output_tokens=prev_output_tokens,
+                                                          prev_rnn_state=prev_rnn_state,
+                                                          prev_context_state=prev_context_state)
+            else:
+                output = self.forward_rnn_one_pass(encoder_output_dict=encoder_output_dict,
+                                                   src_dict=src_dict,
+                                                   encoder_hidden_state=prev_rnn_state)
         return output
 
     def forward_copyrnn_one_pass(self, encoder_output_dict, encoder_hidden_state, src_dict):
@@ -365,7 +370,27 @@ class CopyRnnDecoder(nn.Module):
         total_prob = torch.log(total_prob)
         return total_prob, attn_output.squeeze(1), rnn_state
 
-    def forward_rnn(self, encoder_output_dict, prev_output_tokens, prev_rnn_state, prev_context_state):
+    def forward_rnn_one_pass(self, encoder_output_dict, encoder_hidden_state, src_dict):
+        encoder_output = encoder_output_dict['encoder_output']
+        encoder_output_mask = encoder_output_dict['encoder_padding_mask']
+
+        decoder_input = self.embedding(src_dict[TARGET][:, :-1])
+
+        rnn_output, rnn_state = self.lstm(decoder_input, encoder_hidden_state)
+        attn_output, attn_weights = self.attn_layer(rnn_output, encoder_output, encoder_output_mask)
+        probs = torch.log_softmax(self.generate_proj(attn_output), dim=-1)
+        return probs, attn_output, rnn_state
+
+    def forward_rnn_auto_regressive(self, encoder_output_dict, prev_output_tokens,
+                                    prev_rnn_state, prev_context_state):
+        """
+
+        :param encoder_output_dict:
+        :param prev_output_tokens:
+        :param prev_rnn_state:
+        :param prev_context_state:
+        :return:
+        """
         encoder_output = encoder_output_dict['encoder_output']
         encoder_output_mask = encoder_output_dict['encoder_padding_mask']
         src_embed = self.embedding(prev_output_tokens)
