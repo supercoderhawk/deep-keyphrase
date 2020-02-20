@@ -8,7 +8,7 @@ from deep_keyphrase.copy_rnn.model import CopyRNN
 from deep_keyphrase.copy_rnn.beam_search import BeamSearch
 from deep_keyphrase.dataloader import KeyphraseDataLoader, RAW_BATCH, TOKENS, INFERENCE_MODE, EVAL_MODE
 from deep_keyphrase.utils.vocab_loader import load_vocab
-from deep_keyphrase.utils.constants import BOS_WORD
+from deep_keyphrase.utils.constants import BOS_WORD, UNK_WORD
 from deep_keyphrase.utils.tokenizer import token_char_tokenize
 
 
@@ -47,6 +47,7 @@ class CopyRnnPredictor(BasePredictor):
                                         max_target_len=self.max_target_len,
                                         id2vocab=self.id2vocab,
                                         bos_idx=self.vocab2id[BOS_WORD],
+                                        unk_idx=self.vocab2id[UNK_WORD],
                                         args=self.config)
         self.pred_base_config = {'max_oov_count': self.config.max_oov_count,
                                  'max_src_len': self.max_src_len,
@@ -74,7 +75,7 @@ class CopyRnnPredictor(BasePredictor):
             text_list = [{TOKENS: i} for i in text_list]
         else:
             text_list = [{TOKENS: token_char_tokenize(i)} for i in text_list]
-        args = Munch({'batch_size': batch_size, **self.pred_base_config})
+        args = Munch({'batch_size': batch_size, **self.config._asdict(), **self.pred_base_config})
         loader = KeyphraseDataLoader(data_source=text_list,
                                      vocab2id=self.vocab2id,
                                      mode=INFERENCE_MODE,
@@ -106,6 +107,7 @@ class CopyRnnPredictor(BasePredictor):
                                             max_target_len=self.max_target_len,
                                             id2vocab=self.id2vocab,
                                             bos_idx=self.vocab2id[BOS_WORD],
+                                            unk_idx=self.vocab2id[UNK_WORD],
                                             args=self.config)
 
         for batch in loader:
