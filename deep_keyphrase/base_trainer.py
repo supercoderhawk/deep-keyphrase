@@ -122,7 +122,9 @@ class BaseTrainer(object):
             raise ValueError('stage name error, must be in `valid` and `test`')
         pred_filename = self.dest_dir + self.get_basename(src_filename)
         pred_filename += '.batch_{}.pred.jsonl'.format(step)
+        torch.cuda.empty_cache()
         predict_callback()
+        torch.cuda.empty_cache()
         macro_all_ret = self.macro_evaluator.evaluate(pred_filename)
         macro_present_ret = self.macro_evaluator.evaluate(pred_filename, 'present')
         macro_absent_ret = self.macro_evaluator.evaluate(pred_filename, 'absent')
@@ -135,8 +137,11 @@ class BaseTrainer(object):
             name = 'present/{} macro_f1@{}'.format(stage, n)
             self.writer.add_scalar(name, macro_present_ret[n]['f1'], step)
         for n in self.eval_topn:
-            name = 'absent/{} macro_f1@{}'.format(stage, n)
-            self.writer.add_scalar(name, macro_absent_ret[n]['f1'], step)
+            absent_f1_name = 'absent/{} macro_f1@{}'.format(stage, n)
+            self.writer.add_scalar(absent_f1_name, macro_absent_ret[n]['f1'], step)
+            absent_recall_name = 'absent/{} macro_recall@{}'.format(stage, n)
+            self.writer.add_scalar(absent_recall_name, macro_absent_ret[n]['recall'], step)
+
         statistics = {'{}_macro'.format(stage): macro_all_ret,
                       '{}_macro_present'.format(stage): macro_present_ret,
                       '{}_macro_absent'.format(stage): macro_absent_ret}
