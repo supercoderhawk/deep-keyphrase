@@ -44,3 +44,4 @@ MANIFEST
 /runners
 .env
 Pipfile
+.vscode
