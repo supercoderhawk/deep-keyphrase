@@ -327,10 +327,6 @@ class KeyphraseDataIterator(object):
         assert not self._batch_count_in_output_queue
         assert not self._redundant_batch
         for item_chunk in self._data:
-            # item_chunk is same as a batch
-            item_chunk = [self.loader.collate_fn(item) for item in item_chunk]
-            if len(item_chunk) > 1:
-                item_chunk = self.reorder_batch(item_chunk)
             yield self.batch2tensor(self.padding_batch(item_chunk))
 
     def batch2tensor(self, batch):
