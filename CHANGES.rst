@@ -1,6 +1,10 @@
 =========
 Changelog
 =========
+Version 0.0.7
+====================
+* fix inference output sentence order error
+* continue implementing CopyCNN and CopyTransformer
 
 Version 0.0.6
 ====================
