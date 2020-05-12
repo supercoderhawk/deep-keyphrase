@@ -28,15 +28,8 @@ class CopyTransformer(nn.Module):
     def __init__(self, args, vocab2id):
         super().__init__()
         embedding = nn.Embedding(len(vocab2id), args.input_dim, vocab2id[PAD_WORD])
-        self.encoder = CopyTransformerEncoder(embedding=embedding,
-                                              input_dim=args.input_dim,
-                                              head_size=args.src_head_size,
-                                              feed_forward_dim=args.feed_forward_dim,
-                                              dropout=args.src_dropout,
-                                              num_layers=args.src_layers)
-        self.decoder = CopyTransformerDecoder(embedding=embedding,
-                                              vocab2id=vocab2id,
-                                              args=args)
+        self.encoder = CopyTransformerEncoder(embedding=embedding, args=args)
+        self.decoder = CopyTransformerDecoder(embedding=embedding, vocab2id=vocab2id, args=args)
 
     def forward(self, src_dict, prev_output_tokens, encoder_output, encoder_mask,
                 prev_decoder_state, position, prev_copy_state):
@@ -45,7 +38,8 @@ class CopyTransformer(nn.Module):
             src_dict[TOKENS_LENS] = src_dict[TOKENS_LENS].cuda()
             src_dict[TOKENS_OOV] = src_dict[TOKENS_OOV].cuda()
             src_dict[OOV_COUNT] = src_dict[OOV_COUNT].cuda()
-            prev_output_tokens = prev_output_tokens.cuda()
+            if prev_output_tokens is not None:
+                prev_output_tokens = prev_output_tokens.cuda()
             prev_decoder_state = prev_decoder_state.cuda()
         if encoder_output is None:
             encoder_output, encoder_mask = self.encoder(src_dict=src_dict)
@@ -60,16 +54,19 @@ class CopyTransformer(nn.Module):
 
 
 class CopyTransformerEncoder(nn.Module):
-    def __init__(self, embedding, input_dim, head_size,
-                 feed_forward_dim, dropout, num_layers):
+    def __init__(self, embedding, args):
         super().__init__()
         self.embedding = embedding
-        self.dropout = dropout
-        layer = TransformerEncoderLayer(d_model=input_dim,
-                                        nhead=head_size,
-                                        dim_feedforward=feed_forward_dim,
-                                        dropout=dropout)
-        self.encoder = TransformerEncoder(encoder_layer=layer, num_layers=num_layers)
+        self.input_dim = args.input_dim
+        self.head_size = args.head_size,
+        self.feed_forward_dim = args.feed_forward_dim
+        self.num_layzers = args.num_layers
+        self.dropout = args.dropout
+        layer = TransformerEncoderLayer(d_model=self.input_dim,
+                                        nhead=self.head_size,
+                                        dim_feedforward=self.feed_forward_dim,
+                                        dropout=self.dropout)
+        self.encoder = TransformerEncoder(encoder_layer=layer, num_layers=self.num_layers)
 
     def forward(self, src_dict):
         batch_size, max_len = src_dict[TOKENS].size()
@@ -114,12 +111,25 @@ class CopyTransformerDecoder(nn.Module):
 
     def forward(self, prev_output_tokens, prev_decoder_state, position,
                 encoder_output, encoder_mask, src_dict, prev_copy_state):
-        if self.args.input_feeding and not self.training:
+        if self.args.auto_regressive and not self.training:
             output = self.forward_auto_regressive(prev_output_tokens, prev_decoder_state, position,
                                                   encoder_output, encoder_mask, src_dict, prev_copy_state)
         else:
             output = self.forward_one_pass(encoder_output, encoder_mask, src_dict)
         return output
+
+    def forward_transformer(self, encoder_output, encoder_mask, src_dict):
+        token_embed = self.embedding(src_dict[TARGET][:, :-1])
+        pos_embed = get_position_encoding(token_embed)
+        # B x seq_len x H
+        src_embed = token_embed + pos_embed
+        decoder_input = F.dropout(src_embed, p=self.dropout, training=self.training)
+        decoder_input_mask = torch.triu(torch.ones(self.input_dim, self.input_dim), 1)
+        decoder_output = self.decoder(tgt=decoder_input,
+                                      memory=encoder_output.transpose(1, 0),
+                                      memory_key_padding_mask=decoder_input_mask)
+        probs = torch.softmax(decoder_output, dim=-1)
+        return probs, decoder_output.squeeze(1), None, encoder_output, encoder_mask
 
     def forward_one_pass(self, encoder_output, encoder_mask, src_dict):
         batch_size = len(src_dict[TOKENS])
@@ -151,7 +161,7 @@ class CopyTransformerDecoder(nn.Module):
         return total_prob, decoder_output.squeeze(1), None, encoder_output, encoder_mask
 
     def forward_auto_regressive(self, prev_output_tokens, prev_decoder_state, position,
-                encoder_output, encoder_mask, src_dict, prev_copy_state):
+                                encoder_output, encoder_mask, src_dict, prev_copy_state):
         src_tokens = src_dict[TOKENS]
         src_tokens_with_oov = src_dict[TOKENS_OOV]
         batch_size, src_max_len = src_tokens.size()
@@ -179,7 +189,7 @@ class CopyTransformerDecoder(nn.Module):
                                       memory=encoder_output.transpose(1, 0),
                                       memory_key_padding_mask=decoder_input_mask)
         decoder_output = decoder_output.transpose(1, 0)
-        
+
         # B x 1 x H
         decoder_output = decoder_output[:, -1:, :]
         generation_logits = self.generate_proj(decoder_output).squeeze(1)

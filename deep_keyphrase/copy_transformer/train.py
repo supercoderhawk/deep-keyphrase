@@ -33,7 +33,22 @@ class CopyTransformerTrainer(BaseTrainer):
         return loss
 
     def get_one_pass_loss(self, batch, targets):
-        pass
+        batch_size = len(batch[TOKENS])
+        encoder_output = encoder_mask = None
+        prev_copy_state = None
+        prev_decoder_state = torch.zeros(batch_size, self.args.input_dim)
+        output = self.model(src_dict=batch,
+                            prev_output_tokens=None,
+                            encoder_output=encoder_output,
+                            encoder_mask=encoder_mask,
+                            prev_decoder_state=prev_decoder_state,
+                            position=0,
+                            prev_copy_state=prev_copy_state)
+        decoder_prob, prev_decoder_state, prev_copy_state, encoder_output, encoder_mask = output
+        vocab_size = decoder_prob.size(-1)
+        decoder_prob = decoder_prob.view(-1, vocab_size)
+        loss = self.loss_func(decoder_prob, targets[:, 1:].flatten())
+        return loss
 
     def get_auto_regressive_loss(self, batch, loss, targets):
         batch_size = len(batch[TOKENS])
