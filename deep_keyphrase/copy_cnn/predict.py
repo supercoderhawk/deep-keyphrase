@@ -9,5 +9,6 @@ class CopyCnnPredictor(BasePredictor):
     def predict(self, input_list, batch_size, delimiter=''):
         pass
 
-    def eval_predict(self):
+    def eval_predict(self, src_filename, dest_filename, args,
+                     model=None, remove_existed=False):
         pass
