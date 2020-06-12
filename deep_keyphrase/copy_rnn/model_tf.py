@@ -8,8 +8,8 @@ def mask_fill(t, mask, num):
     """
 
     :param t: input tensor
-    :param mask: mask indicator True for keeping value and False for mask
-    :param num: num to be fill in mask tensor
+    :param mask: mask value True for keeping value and False for mask
+    :param num: num to be fill in masked index
     :return:
     """
     t_dtype = t.dtype
@@ -32,7 +32,7 @@ class Attention(tf.keras.layers.Layer):
         self.output_layer = tf.keras.layers.Dense(self.decoder_dim)
         self.concat_layer = tf.keras.layers.Concatenate()
 
-    def score(self, query, key, mask):
+    def score(self, query, key, mask, dec_len):
         if self.score_mode == 'general':
             attn_weights = tf.matmul(self.attn(query), self.permuate_1_2(key))
         elif self.score_mode == 'concat':
@@ -40,13 +40,13 @@ class Attention(tf.keras.layers.Layer):
         elif self.score_mode == 'dot':
             attn_weights = tf.matmul(query, self.permuate_1_2(key))
 
-        mask = tf.repeat(tf.expand_dims(mask, 1), repeats=query.shape[1], axis=1)
-        attn_weights = mask_fill(attn_weights, mask, float('-inf') / 2)
+        mask = tf.repeat(tf.expand_dims(mask, 1), repeats=dec_len, axis=1)
+        attn_weights = mask_fill(attn_weights, mask, -1e20)
         attn_weights = tf.nn.softmax(attn_weights, axis=2)
         return attn_weights
 
-    def call(self, decoder_output, encoder_output, enc_mask):
-        attn_weights = self.score(decoder_output, encoder_output, enc_mask)
+    def call(self, decoder_output, encoder_output, enc_mask, dec_len):
+        attn_weights = self.score(decoder_output, encoder_output, enc_mask, dec_len)
         context_embed = tf.matmul(attn_weights, encoder_output)
         attn_output = tf.tanh(self.output_layer(self.concat_layer([context_embed, decoder_output])))
         return attn_output
@@ -57,7 +57,9 @@ class CopyRnnTF(tf.keras.Model):
         super().__init__()
         self.args = args
         self.vocab_size = len(vocab2id)
-        self.embedding = tf.keras.layers.Embedding(self.vocab_size, args.embed_dim)
+        initializer = tf.random_uniform_initializer(minval=-0.1, maxval=0.1)
+        self.embedding = tf.keras.layers.Embedding(self.vocab_size, args.embed_dim,
+                                                   embeddings_initializer=initializer)
         self.encoder = Encoder(args, self.embedding)
         self.decoder = Decoder(args, self.embedding)
         self.max_target_len = self.args.max_target_len
@@ -68,26 +70,51 @@ class CopyRnnTF(tf.keras.Model):
         self.unk_idx = vocab2id[UNK_WORD]
         self.bos_idx = vocab2id[BOS_WORD]
 
-    def call(self, x, x_with_oov, x_len, enc_output, dec_x, prev_h, prev_c):
-        if enc_output is None:
+    def call(self, x, x_with_oov, x_len, enc_output, dec_x, prev_h, prev_c,
+             batch_size, dec_len=tf.constant(1, dtype=tf.int64)):
+        # x = mask_fill(x_with_oov, x_with_oov < self.vocab_size, self.unk_idx)
+        if enc_output._rank() <= 1:
             enc_output, prev_h, prev_c = self.encoder(x, x_len)
             prev_h = self.encoder2decoder_state(prev_h)
             prev_c = self.encoder2decoder_state(prev_c)
 
-        probs, prev_h, prev_c = self.decoder(dec_x, x, x_with_oov, x_len, enc_output, prev_h, prev_c)
+        probs, prev_h, prev_c = self.decoder(dec_x, x_with_oov, x_len, enc_output,
+                                             prev_h, prev_c, batch_size, dec_len)
 
         return probs, enc_output, prev_h, prev_c
 
+    def predict(self,
+                x,
+                batch_size=None,
+                verbose=0,
+                steps=None,
+                callbacks=None,
+                max_queue_size=10,
+                workers=1,
+                use_multiprocessing=False):
+        tokens, tokens_with_oov, tokens_len = x
+        return self.beam_search(tokens, tokens_with_oov, tokens_len)
+
     @tf.function
-    def beam_search(self, x, x_with_oov, x_len):
-        batch_size = x.shape[0]
+    def beam_search(self, x, x_with_oov, x_len, batch_size):
+        """
+
+        :param x:
+        :param x_with_oov:
+        :param x_len:
+        :param batch_size_t: 1-D tensor, because SavedModel not support scalar input parameter
+        :return:
+        """
+        batch_size = batch_size[0]
         beam_batch_size = self.beam_size * batch_size
         prev_output_tokens = tf.ones([batch_size, 1], dtype=tf.int64) * self.bos_idx
-
-        probs, enc_output, prev_h, prev_c = self.call(x, x_with_oov, x_len, None,
-                                                      prev_output_tokens, None, None)
+        # assign encoder_output to tf.constant(0) is just as placeholder to avoid exception
+        probs, enc_output, prev_h, prev_c = self.call(x, x_with_oov, x_len, tf.constant(0),
+                                                      prev_output_tokens, tf.constant(0),
+                                                      tf.constant(0), batch_size)
         probs = tf.squeeze(probs, axis=1)
         prev_best_probs, prev_best_index = tf.math.top_k(probs, k=self.beam_size)
+        prev_best_index = tf.cast(prev_best_index, dtype=tf.int64)
 
         prev_h = tf.repeat(prev_h, self.beam_size, axis=0)
         prev_c = tf.repeat(prev_c, self.beam_size, axis=0)
@@ -95,26 +122,28 @@ class CopyRnnTF(tf.keras.Model):
 
         result_sequences = prev_best_index
 
-        prev_best_index = mask_fill(prev_best_index, prev_best_index >= self.vocab_size, self.unk_idx)
+        prev_best_index = mask_fill(prev_best_index, prev_best_index < self.vocab_size, self.unk_idx)
         prev_best_index = tf.reshape(prev_best_index, [beam_batch_size, -1])
         x = tf.repeat(x, repeats=self.beam_size, axis=0)
-
         x_with_oov = tf.repeat(x_with_oov, repeats=self.beam_size, axis=0)
         x_len = tf.repeat(x_len, repeats=self.beam_size, axis=0)
 
         for target_idx in range(1, self.max_target_len):
             probs, enc_output, prev_h, prev_c = self.call(x, x_with_oov, x_len, enc_output,
                                                           prev_best_index,
-                                                          prev_h, prev_c)
+                                                          prev_h, prev_c, beam_batch_size)
             probs = tf.squeeze(probs, axis=1)
-            accumulated_probs = tf.reshape(prev_best_probs, [beam_batch_size, -1])
+            # B x b*V
+            accumulated_probs = tf.reshape(prev_best_probs, [beam_batch_size, 1])
             accumulated_probs = tf.repeat(accumulated_probs, repeats=self.total_vocab_size, axis=1)
             accumulated_probs += probs
             accumulated_probs = tf.reshape(accumulated_probs, [batch_size, -1])
-            beam_search_best_probs, top_token_index = tf.math.top_k(-accumulated_probs, self.beam_size)
+            prev_best_probs, top_token_index = tf.math.top_k(accumulated_probs, k=self.beam_size)
+            top_token_index = tf.cast(top_token_index, dtype=tf.int64)
 
-            select_idx_factor = tf.range(0, batch_size) * self.beam_size
-            select_idx_factor = tf.repeat(tf.expand_dims(select_idx_factor, axis=1), self.beam_size, axis=1)
+            select_idx_factor = tf.range(0, batch_size, dtype=tf.int64) * self.beam_size
+            select_idx_factor = tf.repeat(tf.expand_dims(select_idx_factor, axis=1),
+                                          self.beam_size, axis=1)
             state_select_idx = tf.reshape(top_token_index, [beam_batch_size]) // probs.shape[1]
             state_select_idx += tf.reshape(select_idx_factor, [beam_batch_size])
 
@@ -128,8 +157,8 @@ class CopyRnnTF(tf.keras.Model):
 
             result_sequences = tf.concat([result_sequences, tf.expand_dims(prev_best_index, axis=2)], axis=2)
 
-            prev_best_index = tf.reshape(prev_best_index, [beam_batch_size, -1])
-            prev_best_index = mask_fill(prev_best_index, prev_best_index >= self.vocab_size, self.unk_idx)
+            prev_best_index = tf.reshape(prev_best_index, [beam_batch_size, 1])
+            prev_best_index = mask_fill(prev_best_index, prev_best_index < self.vocab_size, self.unk_idx)
 
         return result_sequences
 
@@ -154,7 +183,7 @@ class Encoder(tf.keras.layers.Layer):
             state_h = tf.concat([state_fw_h, state_bw_h], axis=1)
             state_c = tf.concat([state_fw_c, state_bw_c], axis=1)
         else:
-            lstm_output, state_h, state_c = self.lstm(embed_x)
+            lstm_output, state_h, state_c = self.lstm(embed_x, mask=mask)
         return lstm_output, state_h, state_c
 
 
@@ -165,7 +194,7 @@ class Decoder(tf.keras.layers.Layer):
         self.embedding = embedding
         self.vocab_size = self.embedding.input_dim
         self.max_oov_count = self.args.max_oov_count
-        self.max_dec = self.args.max_src_len
+        self.max_src_len = self.args.max_src_len
         self.max_enc = self.args.max_src_len
         self.lstm = tf.keras.layers.LSTM(self.args.decoder_hidden_size,
                                          return_state=True, return_sequences=True)
@@ -180,56 +209,45 @@ class Decoder(tf.keras.layers.Layer):
         self.copy_layer = tf.keras.layers.Dense(self.args.decoder_hidden_size)
         self.permuate_1_2 = tf.keras.layers.Permute((2, 1))
 
-    def call(self, dec_x, enc_x, enc_x_with_oov, enc_len, enc_output, enc_h, enc_c):
-        return self.call_one_pass(dec_x, enc_x, enc_x_with_oov, enc_len, enc_output, enc_h, enc_c)
-
-    def call_one_pass(self, dec_x, enc_x: tf.Tensor, enc_x_with_oov, enc_len, enc_output, enc_h, enc_c):
+    def call(self, dec_x, enc_x_with_oov, enc_len, enc_output,
+             enc_h, enc_c, batch_size, dec_len):
         """
-        use for teacher forcing during training
+
         :return:
         """
         embed_dec_x = self.embedding(dec_x)
-        mask = tf.sequence_mask(enc_len, maxlen=self.max_dec)
-        hidden_states, state_h, state_c = self.lstm(embed_dec_x, (enc_h, enc_c))
-        attn_output = self.attention(hidden_states, enc_output, mask)
+        mask = tf.sequence_mask(enc_len, maxlen=self.max_src_len)
+        hidden_states, state_h, state_c = self.lstm(embed_dec_x, initial_state=(enc_h, enc_c))
+        attn_output = self.attention(hidden_states, enc_output, mask, dec_len)
         generation_logits = tf.exp(self.generate_layer(attn_output))
 
         generation_logits = tf.pad(generation_logits, [[0, 0], [0, 0], [0, self.max_oov_count]],
                                    constant_values=1e-10)
-
-        copy_logits = self.get_copy_score(enc_output, enc_x_with_oov, attn_output)
+        copy_logits = self.get_copy_score(enc_output, enc_x_with_oov, attn_output, mask, batch_size, dec_len)
         total_logits = generation_logits + copy_logits
-        total_prob = total_logits / tf.reduce_sum(total_logits, axis=1, keepdims=True)
-        # total_prob = tf.math.log1p(total_prob)
+        total_prob = total_logits / tf.reduce_sum(total_logits, axis=2, keepdims=True)
+        total_prob = tf.math.log(total_prob)
         return total_prob, state_h, state_c
 
-    def call_auto_regressive(self, x, prev_state):
-        embed_x = self.embedding(x)
-        hidden_states, state_h, state_c = self.lstm(embed_x, prev_state)
-
-    def get_copy_score(self, src_output, x_with_oov: tf.Tensor, tgt_output):
-        batch_size = x_with_oov.shape[0]
+    def get_copy_score(self, src_output, x_with_oov: tf.Tensor, tgt_output, mask, batch_size, dec_len):
         total_vocab_size = self.vocab_size + self.max_oov_count
-        dec_len = tgt_output.shape[1]
-
         tgt_output = self.permuate_1_2(tgt_output)
-        copy_score_in_seq = tf.matmul(tf.tanh(self.copy_layer(src_output)), tgt_output)
 
+        copy_score_in_seq = tf.matmul(tf.tanh(self.copy_layer(src_output)), tgt_output)
         copy_score_in_seq = self.permuate_1_2(copy_score_in_seq)
+        mask = tf.repeat(tf.expand_dims(mask, axis=1), repeats=dec_len, axis=1)
+        copy_score_in_seq = mask_fill(copy_score_in_seq, mask, -1e20)
         copy_score_in_seq = tf.exp(copy_score_in_seq)
 
-        batch_idx, src_idx, _ = tf.meshgrid(tf.range(batch_size, dtype=tf.int64),
-                                            tf.range(dec_len, dtype=tf.int64),
-                                            tf.range(self.max_dec, dtype=tf.int64), indexing="ij")
-        # batch_idx = tf.transpose(tf.broadcast_to(tf.range(batch_size, dtype=tf.int64),
-        #                                          [self.max_dec, dec_len, batch_size]))
-        # src_idx = tf.broadcast_to(tf.range(dec_len, dtype=tf.int64), [batch_size, dec_len])
-        # src_idx = tf.repeat(tf.expand_dims(src_idx, axis=2), repeats=self.max_dec, axis=2)
+        batch_idx = tf.transpose(tf.broadcast_to(tf.range(batch_size, dtype=tf.int64),
+                                                 [self.max_src_len, dec_len, batch_size]))
+        src_idx = tf.broadcast_to(tf.range(dec_len, dtype=tf.int64), [batch_size, dec_len])
+        src_idx = tf.repeat(tf.expand_dims(src_idx, axis=2), repeats=self.max_src_len, axis=2)
         x_with_oov = tf.repeat(tf.expand_dims(x_with_oov, axis=1), repeats=dec_len, axis=1)
-        # Create final indices
+
         score_idx = tf.stack([batch_idx, src_idx, x_with_oov], axis=-1)
-        # Output shape
+
         to_shape = [batch_size, dec_len, total_vocab_size]
-        # Get scattered tensor
+
         copy_score_in_vocab = tf.scatter_nd(score_idx, copy_score_in_seq, to_shape)
         return copy_score_in_vocab
