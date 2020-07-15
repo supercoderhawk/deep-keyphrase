@@ -102,8 +102,9 @@ class PredictorTF(object):
         sent_len = len(token_ids)
 
         if len(token_ids) < self.max_src_len:
-            token_ids.extend([PAD_WORD] * (self.max_src_len - len(token_ids)))
-            token_ids_with_oov.extend([PAD_WORD] * (self.max_src_len - len(token_ids)))
+            pad_tokens = [self.vocab2id[PAD_WORD]] * (self.max_src_len - len(token_ids))
+            token_ids.extend(pad_tokens)
+            token_ids_with_oov.extend(pad_tokens)
         elif len(token_ids) > self.max_src_len:
             token_ids = token_ids[:self.max_src_len]
             token_ids_with_oov = token_ids_with_oov[:self.max_src_len]
