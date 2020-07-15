@@ -1,11 +1,9 @@
 # -*- coding: UTF-8 -*-
 import random
-import time
 import traceback
 import sys
 import numpy as np
-import torch
-import torch.multiprocessing as multiprocessing
+import multiprocessing
 from pysenal import read_jsonline_lazy, get_chunk, read_jsonline
 from deep_keyphrase.utils.constants import *
 
@@ -44,6 +42,7 @@ class KeyphraseDataLoader(object):
         self.max_oov_count = args.max_oov_count
         self.max_target_len = args.max_target_len
         self.mode = mode
+        self.fix_batch_size = args.fix_batch_size
         self.prefetch = args.prefetch
         self.lazy_loading = args.lazy_loading
         self.shuffle = args.shuffle
@@ -104,6 +103,8 @@ class KeyphraseDataIterator(object):
         self.token_field = loader.token_field
         self.keyphrases_field = loader.keyphrases_field
         self.lazy_loading = loader.lazy_loading
+        self.backend = loader.args.backend
+        self.fix_batch_size = loader.fix_batch_size
         self.num_workers = multiprocessing.cpu_count() // 2 or 1
 
         if self.loader.mode == TRAIN_MODE:
@@ -223,7 +224,7 @@ class KeyphraseDataIterator(object):
                 self.input_queue.put(batch)
                 self._batch_count_in_output_queue += 1
         else:
-            for _ in range(self.num_workers * 5):
+            for _ in range(self.num_workers):
                 try:
                     item_chunk = next(self._data)
                 except StopIteration:
@@ -273,16 +274,31 @@ class KeyphraseDataIterator(object):
         batches = []
 
         for item in item_chunk:
-            if batch and len(batch) > self.batch_size:
-                for sliced_batch in get_chunk(batch, self.batch_size):
-                    batches.append(sliced_batch)
-                batch = []
-            flatten_items = self.flatten_raw_item(item)
-            if batch and len(batch) + len(flatten_items) > self.batch_size:
-                batches.append(batch)
-                batch = flatten_items
-            else:
+            if self.fix_batch_size:
+                if batch and len(batch) > self.batch_size:
+                    tail_count = len(batch) % self.batch_size
+                    if tail_count:
+                        batch_chunk = batch[:-tail_count]
+                        batch = batch[-tail_count:]
+                    else:
+                        batch_chunk = batch
+                        batch = []
+                    for sliced_batch in get_chunk(batch_chunk, self.batch_size):
+                        batches.append(sliced_batch)
+
+                flatten_items = self.flatten_raw_item(item)
                 batch.extend(flatten_items)
+            else:
+                if batch and len(batch) > self.batch_size:
+                    for sliced_batch in get_chunk(batch, self.batch_size):
+                        batches.append(sliced_batch)
+                    batch = []
+                flatten_items = self.flatten_raw_item(item)
+                if batch and len(batch) + len(flatten_items) > self.batch_size:
+                    batches.append(batch)
+                    batch = flatten_items
+                else:
+                    batch.extend(flatten_items)
         # batches = self.reorder_batch_list(batches)
         return batches, batch
 
@@ -333,7 +349,12 @@ class KeyphraseDataIterator(object):
         new_batch = {}
         for key, val in batch.items():
             if isinstance(val, np.ndarray):
-                new_batch[key] = torch.as_tensor(val)
+                if self.backend == 'torch':
+                    import torch
+                    new_batch[key] = torch.as_tensor(val)
+                elif self.backend == 'tf':
+                    import tensorflow as tf
+                    new_batch[key] = tf.constant(val)
             else:
                 new_batch[key] = val
         return new_batch
