@@ -29,7 +29,8 @@ class PredictorTF(object):
     def predict(self, text_list):
         x_batch, x_oov_batch, sent_len_batch, oov_list_batch = self.generate_input_batch(text_list)
         batch_size = len(x_batch)
-        result_tensor = self.model.beam_search(x_batch, x_oov_batch, sent_len_batch, [batch_size])
+        batch_size_np = np.array([batch_size], dtype=np.long)
+        result_tensor = self.model.beam_search(x_batch, x_oov_batch, sent_len_batch, batch_size_np)
         result_np = result_tensor.numpy()
         return self.__idx2result_beam('', oov_list_batch, result_np)
 
