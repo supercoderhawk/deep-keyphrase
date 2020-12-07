@@ -186,6 +186,7 @@ class CopyRnnTrainer(BaseTrainer):
         parser.add_argument('-processed', action='store_true', help='')
         parser.add_argument('-prefetch', action='store_true', help='')
         parser.add_argument('-lazy_loading', action='store_true', help='')
+        parser.add_argument('-fix_batch_size', action='store_true', help='')
 
         # model specific parameter
         parser.add_argument("-embed_size", type=int, default=200, help='')
